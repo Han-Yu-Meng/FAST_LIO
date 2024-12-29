@@ -640,6 +640,7 @@ void set_posestamp(T & out)
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
+    // 原始代码，发布的是lidar_odom到base_lidar的tf
     odomAftMapped.header.frame_id = "lidar_odom";
     odomAftMapped.child_frame_id = "base_lidar";
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
@@ -657,34 +658,50 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
     }
 
-//    // 原始代码，发布的是lidar_odom到base_lidar的tf
-//    geometry_msgs::msg::TransformStamped trans;
-//    trans.header.frame_id = "lidar_odom";
-//    trans.child_frame_id = "base_lidar";
-//    trans.header.stamp = get_ros_time(lidar_end_time);
-//    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
-//    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
-//    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
-//    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
-//    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
-//    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
-//    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
-//    tf_br->sendTransform(trans);
-
-    // 修改代码，发布的是lidar_odom到base_link的tf
     geometry_msgs::msg::TransformStamped trans;
-    trans.header.stamp = odomAftMapped.header.stamp;
     trans.header.frame_id = "lidar_odom";
-    trans.child_frame_id = "base_link";
-
-    tf2::Transform tf_lidar_odom_to_lidar;
-    tf2::fromMsg(odomAftMapped.pose.pose, tf_lidar_odom_to_lidar);
-    tf2::Transform tf_lidar_to_base_link;
-    tf2::fromMsg(transform_lidar2base.transform, tf_lidar_to_base_link);
-    tf2::Transform tf_lidar_odom_to_base_link = tf_lidar_odom_to_lidar * tf_lidar_to_base_link;
-
-    trans.transform = tf2::toMsg(tf_lidar_odom_to_base_link);
+    trans.child_frame_id = "base_lidar";
+    trans.header.stamp = get_ros_time(lidar_end_time);
+    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
+    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
+    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
+    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
+    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
+    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
+    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
     tf_br->sendTransform(trans);
+
+//    // 修改代码，发布的是lidar_odom到base_link的tf
+//    odomAftMapped.header.frame_id = "lidar_odom";
+//    odomAftMapped.child_frame_id = "base_lidar";
+//    odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
+//    set_posestamp(odomAftMapped.pose);
+//    pubOdomAftMapped->publish(odomAftMapped);
+//    auto P = kf.get_P();
+//    for (int i = 0; i < 6; i ++)
+//    {
+//        int k = i < 3 ? i + 3 : i - 3;
+//        odomAftMapped.pose.covariance[i*6 + 0] = P(k, 3);
+//        odomAftMapped.pose.covariance[i*6 + 1] = P(k, 4);
+//        odomAftMapped.pose.covariance[i*6 + 2] = P(k, 5);
+//        odomAftMapped.pose.covariance[i*6 + 3] = P(k, 0);
+//        odomAftMapped.pose.covariance[i*6 + 4] = P(k, 1);
+//        odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
+//    }
+//
+//    geometry_msgs::msg::TransformStamped trans;
+//    trans.header.stamp = odomAftMapped.header.stamp;
+//    trans.header.frame_id = "lidar_odom";
+//    trans.child_frame_id = "base_link";
+//
+//    tf2::Transform tf_lidar_odom_to_lidar;
+//    tf2::fromMsg(odomAftMapped.pose.pose, tf_lidar_odom_to_lidar);
+//    tf2::Transform tf_lidar_to_base_link;
+//    tf2::fromMsg(transform_lidar2base.transform, tf_lidar_to_base_link);
+//    tf2::Transform tf_lidar_odom_to_base_link = tf_lidar_odom_to_lidar * tf_lidar_to_base_link;
+//
+//    trans.transform = tf2::toMsg(tf_lidar_odom_to_base_link);
+//    tf_br->sendTransform(trans);
 }
 
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
@@ -964,10 +981,10 @@ public:
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-        // ADD LINES BELOW
-        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-        transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-        // ADD LINES ABOVE
+//        // ADD LINES BELOW
+//        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+//        transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+//        // ADD LINES ABOVE
 
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
@@ -978,22 +995,23 @@ public:
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 
-        // ADD LINES BELOW
-        bool transform_available = false;
-        while (!transform_available)
-        {
-            try
-            {
-                transform_lidar2base = tf_buffer_->lookupTransform("base_lidar", "base_link", tf2::TimePointZero);
-                transform_available = true;
-                RCLCPP_INFO(this->get_logger(), "Transform available");
-            }
-            catch (tf2::TransformException &ex)
-            {
-                RCLCPP_WARN(this->get_logger(), "%s", ex.what());
-                rclcpp::sleep_for(std::chrono::milliseconds(100));
-            }
-        }
+//        // ADD LINES BELOW
+//        bool transform_available = false;
+//        while (!transform_available)
+//        {
+//            try
+//            {
+//                transform_lidar2base = tf_buffer_->lookupTransform("base_lidar", "base_link", tf2::TimePointZero);
+//                transform_available = true;
+//                RCLCPP_INFO(this->get_logger(), "Transform available");
+//            }
+//            catch (tf2::TransformException &ex)
+//            {
+//                RCLCPP_WARN(this->get_logger(), "%s", ex.what());
+//                rclcpp::sleep_for(std::chrono::milliseconds(100));
+//            }
+//        }
+//        // ADD LINES ABOVE
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
