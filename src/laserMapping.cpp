@@ -658,18 +658,18 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
     }
 
-    geometry_msgs::msg::TransformStamped trans;
-    trans.header.frame_id = "lidar_odom";
-    trans.child_frame_id = "base_lidar";
-    trans.header.stamp = get_ros_time(lidar_end_time);
-    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
-    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
-    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
-    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
-    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
-    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
-    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
-    tf_br->sendTransform(trans);
+//    geometry_msgs::msg::TransformStamped trans;
+//    trans.header.frame_id = "lidar_odom";
+//    trans.child_frame_id = "base_lidar";
+//    trans.header.stamp = get_ros_time(lidar_end_time);
+//    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
+//    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
+//    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
+//    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
+//    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
+//    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
+//    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
+//    tf_br->sendTransform(trans);
 
 //    // 修改代码，发布的是lidar_odom到base_link的tf
 //    odomAftMapped.header.frame_id = "lidar_odom";
