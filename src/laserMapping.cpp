@@ -1039,6 +1039,12 @@ public:
             imu_odometry.pose.pose.orientation.y = imu_state.rot.coeffs()[1];
             imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()[2];
             imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()[3];
+            imu_odometry.twist.twist.linear.x = imu_state.vel(0);
+            imu_odometry.twist.twist.linear.y = imu_state.vel(1);
+            imu_odometry.twist.twist.linear.z = imu_state.vel(2);
+            imu_odometry.twist.twist.angular.x = ang_vel(0);
+            imu_odometry.twist.twist.angular.y = ang_vel(1);
+            imu_odometry.twist.twist.angular.z = ang_vel(2);
 
             pubOdomAftMapped_->publish(imu_odometry);
 
@@ -1208,7 +1214,7 @@ private:
             kf_copy = kf;
 
             /******* Publish odometry *******/
-            publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+            // publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
