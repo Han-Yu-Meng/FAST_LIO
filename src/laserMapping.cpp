@@ -1035,10 +1035,10 @@ public:
             imu_odometry.pose.pose.position.x = imu_state.pos(0);
             imu_odometry.pose.pose.position.y = imu_state.pos(1);
             imu_odometry.pose.pose.position.z = imu_state.pos(2);
-            imu_odometry.pose.pose.orientation.x = state_point.rot.coeffs()[0];
-            imu_odometry.pose.pose.orientation.y = state_point.rot.coeffs()[1];
-            imu_odometry.pose.pose.orientation.z = state_point.rot.coeffs()[2];
-            imu_odometry.pose.pose.orientation.w = state_point.rot.coeffs()[3];
+            imu_odometry.pose.pose.orientation.x = imu_state.rot.coeffs()[0];
+            imu_odometry.pose.pose.orientation.y = imu_state.rot.coeffs()[1];
+            imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()[2];
+            imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()[3];
 
             pubOdomAftMapped_->publish(imu_odometry);
 
