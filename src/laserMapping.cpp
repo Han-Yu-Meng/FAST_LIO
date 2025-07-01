@@ -1039,9 +1039,13 @@ public:
             imu_odometry.pose.pose.orientation.y = imu_state.rot.coeffs()[1];
             imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()[2];
             imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()[3];
-            imu_odometry.twist.twist.linear.x = imu_state.vel(0);
-            imu_odometry.twist.twist.linear.y = imu_state.vel(1);
-            imu_odometry.twist.twist.linear.z = imu_state.vel(2);
+
+            // imu_state.vel 保存的是世界坐标系下的速度
+
+            vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel;
+            imu_odometry.twist.twist.linear.x = vel_body(0);
+            imu_odometry.twist.twist.linear.y = vel_body(1);
+            imu_odometry.twist.twist.linear.z = vel_body(2);
             imu_odometry.twist.twist.angular.x = ang_vel(0);
             imu_odometry.twist.twist.angular.y = ang_vel(1);
             imu_odometry.twist.twist.angular.z = ang_vel(2);
