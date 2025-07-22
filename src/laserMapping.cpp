@@ -958,11 +958,6 @@ public:
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-//        // ADD LINES BELOW
-//        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-//        transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-//        // ADD LINES ABOVE
-
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
         timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this));
@@ -971,24 +966,6 @@ public:
         map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
-
-//        // ADD LINES BELOW
-//        bool transform_available = false;
-//        while (!transform_available)
-//        {
-//            try
-//            {
-//                transform_lidar2base = tf_buffer_->lookupTransform("base_lidar", "base_link", tf2::TimePointZero);
-//                transform_available = true;
-//                RCLCPP_INFO(this->get_logger(), "Transform available");
-//            }
-//            catch (tf2::TransformException &ex)
-//            {
-//                RCLCPP_WARN(this->get_logger(), "%s", ex.what());
-//                rclcpp::sleep_for(std::chrono::milliseconds(100));
-//            }
-//        }
-//        // ADD LINES ABOVE
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
@@ -1275,11 +1252,6 @@ private:
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-    // ADD LINES BELOW
-    std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
-    std::shared_ptr<tf2_ros::TransformListener> transform_listener_;
-    // ADD LINES ABOVE
-
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
