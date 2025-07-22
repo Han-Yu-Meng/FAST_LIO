@@ -140,7 +140,7 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
-esekfom::esekf<state_ikfom, 12, input_ikfom> kf_copy;
+esekfom::esekf<state_ikfom, 12, input_ikfom> kf_copy; // 在每次观测更新后，继承kf中的状态，用于IMU预测
 state_ikfom state_point;
 vect3 pos_lid;
 
@@ -361,36 +361,6 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     sig_buffer.notify_all();
 }
 
-void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
-{
-    publish_count ++;
-    // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
-    sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
-    
-
-    msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
-    if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
-    {
-        msg->header.stamp = \
-        rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
-    }
-
-    double timestamp = get_time_sec(msg->header.stamp);
-
-    mtx_buffer.lock();
-
-    if (timestamp < last_timestamp_imu)
-    {
-        std::cerr << "lidar loop back, clear buffer" << std::endl;
-        imu_buffer.clear();
-    }
-
-    last_timestamp_imu = timestamp;
-
-    imu_buffer.push_back(msg);
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-}
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
@@ -880,6 +850,7 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
+        this->declare_parameter<bool>("use_imu_odometry", true);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
@@ -916,7 +887,7 @@ public:
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
-
+        this->get_parameter_or<bool>("use_imu_odometry", use_imu_odometry_, true);
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
         path.header.stamp = this->get_clock()->now();
@@ -949,7 +920,10 @@ public:
 
         fill(epsi, epsi+23, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
-        kf_copy.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+
+        if (use_imu_odometry_) {
+            kf_copy.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+        }
 
         /*** debug record ***/
         // FILE *fp;
@@ -974,90 +948,8 @@ public:
         {
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         }
-        // sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
-        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, [this](const sensor_msgs::msg::Imu::UniquePtr msg_in) {
-            auto t0 = omp_get_wtime();
 
-                publish_count ++;
-
-              // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
-              sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
-
-
-              msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
-              if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
-              {
-                  msg->header.stamp = \
-                  rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
-              }
-
-              double timestamp = get_time_sec(msg->header.stamp);
-
-              mtx_buffer.lock();
-
-              if (timestamp < last_timestamp_imu)
-              {
-                  std::cerr << "lidar loop back, clear buffer" << std::endl;
-                  imu_buffer.clear();
-              }
-              auto dt = timestamp - last_timestamp_imu;
-
-              last_timestamp_imu = timestamp;
-
-              imu_buffer.push_back(msg);
-              mtx_buffer.unlock();
-              sig_buffer.notify_all();
-
-            auto t1 = omp_get_wtime();
-
-            // IMU 预测
-            if (p_imu->imu_need_init()) {
-                return;
-            }
-
-            V3D ang_vel, acc;
-            ang_vel << msg_in->angular_velocity.x, msg_in->angular_velocity.y, msg_in->angular_velocity.z;
-            acc << msg_in->linear_acceleration.x, msg_in->linear_acceleration.y, msg_in->linear_acceleration.z;
-            acc = acc * G_m_s2 / p_imu->get_mean_acc().norm();
-
-            input_ikfom in;
-            in.acc = acc;
-            in.gyro = ang_vel;
-
-            kf_copy.predict(dt, p_imu->Q, in);
-            auto imu_state = kf_copy.get_x();
-
-            // 发布imu 里程计
-            nav_msgs::msg::Odometry imu_odometry;
-            imu_odometry.header.stamp = msg_in->header.stamp;
-            imu_odometry.header.frame_id = "lidar_odom";
-            imu_odometry.child_frame_id = "base_lidar";
-            imu_odometry.pose.pose.position.x = imu_state.pos(0);
-            imu_odometry.pose.pose.position.y = imu_state.pos(1);
-            imu_odometry.pose.pose.position.z = imu_state.pos(2);
-            imu_odometry.pose.pose.orientation.x = imu_state.rot.coeffs()[0];
-            imu_odometry.pose.pose.orientation.y = imu_state.rot.coeffs()[1];
-            imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()[2];
-            imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()[3];
-
-            // imu_state.vel 保存的是世界坐标系下的速度
-
-            vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel;
-            imu_odometry.twist.twist.linear.x = vel_body(0);
-            imu_odometry.twist.twist.linear.y = vel_body(1);
-            imu_odometry.twist.twist.linear.z = vel_body(2);
-            imu_odometry.twist.twist.angular.x = ang_vel(0);
-            imu_odometry.twist.twist.angular.y = ang_vel(1);
-            imu_odometry.twist.twist.angular.z = ang_vel(2);
-
-            pubOdomAftMapped_->publish(imu_odometry);
-
-            auto t2 = omp_get_wtime();
-            // std::cout << "[IMU Process] Add to buffter, time cost " << t1 - t0 << "s" << std::endl;
-            // std::cout << "[IMU Process] Predict imu state, time cost: " << t2 - t1 << "s" << std::endl;
-
-
-        });
+        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -1109,6 +1001,87 @@ public:
     }
 
 private:
+    void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in) {
+        auto t0 = omp_get_wtime();
+        publish_count ++;
+
+          // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
+          sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+
+
+          msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
+          if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
+          {
+              msg->header.stamp = \
+              rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
+          }
+
+          double timestamp = get_time_sec(msg->header.stamp);
+
+          mtx_buffer.lock();
+
+          if (timestamp < last_timestamp_imu)
+          {
+              std::cerr << "lidar loop back, clear buffer" << std::endl;
+              imu_buffer.clear();
+          }
+          auto dt = timestamp - last_timestamp_imu;
+
+          last_timestamp_imu = timestamp;
+
+          imu_buffer.push_back(msg);
+          mtx_buffer.unlock();
+          sig_buffer.notify_all();
+
+        auto t1 = omp_get_wtime();
+
+        // IMU 预测
+        if (p_imu->imu_need_init()) {
+            return;
+        }
+
+        V3D ang_vel, acc;
+        ang_vel << msg_in->angular_velocity.x, msg_in->angular_velocity.y, msg_in->angular_velocity.z;
+        acc << msg_in->linear_acceleration.x, msg_in->linear_acceleration.y, msg_in->linear_acceleration.z;
+        acc = acc * G_m_s2 / p_imu->get_mean_acc().norm();
+
+        input_ikfom in;
+        in.acc = acc;
+        in.gyro = ang_vel;
+
+        if (use_imu_odometry_) {
+            kf_copy.predict(dt, p_imu->Q, in);
+            auto imu_state = kf_copy.get_x();
+
+            // 发布imu 里程计
+            nav_msgs::msg::Odometry imu_odometry;
+            imu_odometry.header.stamp = msg_in->header.stamp;
+            imu_odometry.header.frame_id = "lidar_odom";
+            imu_odometry.child_frame_id = "base_lidar";
+            imu_odometry.pose.pose.position.x = imu_state.pos(0);
+            imu_odometry.pose.pose.position.y = imu_state.pos(1);
+            imu_odometry.pose.pose.position.z = imu_state.pos(2);
+            imu_odometry.pose.pose.orientation.x = imu_state.rot.coeffs()[0];
+            imu_odometry.pose.pose.orientation.y = imu_state.rot.coeffs()[1];
+            imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()[2];
+            imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()[3];
+
+            // imu_state.vel 保存的是世界坐标系下的速度
+            vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel;
+            imu_odometry.twist.twist.linear.x = vel_body(0);
+            imu_odometry.twist.twist.linear.y = vel_body(1);
+            imu_odometry.twist.twist.linear.z = vel_body(2);
+            imu_odometry.twist.twist.angular.x = ang_vel(0);
+            imu_odometry.twist.twist.angular.y = ang_vel(1);
+            imu_odometry.twist.twist.angular.z = ang_vel(2);
+
+            pubOdomAftMapped_->publish(imu_odometry);
+        }
+        auto t2 = omp_get_wtime();
+        // std::cout << "[IMU Process] Add to buffter, time cost " << t1 - t0 << "s" << std::endl;
+        // std::cout << "[IMU Process] Predict imu state, time cost: " << t2 - t1 << "s" << std::endl;
+    }
+
     void timer_callback()
     {
         if(sync_packages(Measures))
@@ -1214,11 +1187,16 @@ private:
 
             double t_update_end = omp_get_wtime();
 
-            // // 更新 kf_copy 与 kf 状态一致
-            kf_copy = kf;
+            // 更新 kf_copy 与 kf 状态一致
+            if (use_imu_odometry_) {
+                kf_copy = kf;
+            }
+
 
             /******* Publish odometry *******/
-            // publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+            if (!use_imu_odometry_) {
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+            }
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
@@ -1311,6 +1289,7 @@ private:
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
     double epsi[23] = {0.001};
+    bool use_imu_odometry_;
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;
