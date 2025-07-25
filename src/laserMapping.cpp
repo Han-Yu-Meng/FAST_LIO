@@ -616,20 +616,20 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
 
-    // // 计算线速度
-    // vect3 vel_body = state_point.rot.conjugate() * state_point.vel;
-    // odomAftMapped.twist.twist.linear.x = vel_body(0);
-    // odomAftMapped.twist.twist.linear.y = vel_body(1);
-    // odomAftMapped.twist.twist.linear.z = vel_body(2);
-    //
-    // // 计算角速度
-    // static SO3 last_rot = SO3::Identity();
-    // SO3 delta_rot = state_point.rot * last_rot.conjugate();
-    // last_rot = state_point.rot;
-    // vect3 ang_vel_body = SO3::log(delta_rot); // TODO: 需要计算dt
-    // odomAftMapped.twist.twist.angular.x = ang_vel_body(0);
-    // odomAftMapped.twist.twist.angular.y = ang_vel_body(1);
-    // odomAftMapped.twist.twist.angular.z = ang_vel_body(2);
+    // 计算线速度
+    vect3 vel_body = state_point.rot.conjugate() * state_point.vel;
+    odomAftMapped.twist.twist.linear.x = vel_body(0);
+    odomAftMapped.twist.twist.linear.y = vel_body(1);
+    odomAftMapped.twist.twist.linear.z = vel_body(2);
+
+    // 计算角速度
+    static SO3 last_rot = SO3::Identity();
+    SO3 delta_rot = state_point.rot * last_rot.conjugate();
+    last_rot = state_point.rot;
+    vect3 ang_vel_body = SO3::log(delta_rot); // TODO: 需要计算dt
+    odomAftMapped.twist.twist.angular.x = ang_vel_body(0);
+    odomAftMapped.twist.twist.angular.y = ang_vel_body(1);
+    odomAftMapped.twist.twist.angular.z = ang_vel_body(2);
 
     // 计算协方差
     auto P = kf.get_P();
