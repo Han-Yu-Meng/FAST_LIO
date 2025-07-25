@@ -93,7 +93,7 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic;
+string map_file_path, lid_topic, imu_topic, initial_frame, body_frame;
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -489,7 +489,7 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = "lidar_odom";
+        laserCloudmsg.header.frame_id = initial_frame;
         pubLaserCloudFull->publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
@@ -541,7 +541,7 @@ void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "base_lidar";
+    laserCloudmsg.header.frame_id = body_frame;
     pubLaserCloudFull_body->publish(laserCloudmsg);
     publish_count -= PUBFRAME_PERIOD;
 }
@@ -558,7 +558,7 @@ void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shar
     sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
     pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
     laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudFullRes3.header.frame_id = "lidar_odom";
+    laserCloudFullRes3.header.frame_id = initial_frame;
     pubLaserCloudEffect->publish(laserCloudFullRes3);
 }
 
@@ -580,13 +580,13 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
     pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
     // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "lidar_odom";
+    laserCloudmsg.header.frame_id = initial_frame;
     pubLaserCloudMap->publish(laserCloudmsg);
 
     // sensor_msgs::msg::PointCloud2 laserCloudMap;
     // pcl::toROSMsg(*featsFromMap, laserCloudMap);
     // laserCloudMap.header.stamp = get_ros_time(lidar_end_time);
-    // laserCloudMap.header.frame_id = "lidar_odom";
+    // laserCloudMap.header.frame_id = initial_frame;
     // pubLaserCloudMap->publish(laserCloudMap);
 }
 
@@ -611,9 +611,8 @@ void set_posestamp(T & out)
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
-    // 原始代码，发布的是lidar_odom到base_lidar的tf
-    odomAftMapped.header.frame_id = "lidar_odom";
-    odomAftMapped.child_frame_id = "base_lidar";
+    odomAftMapped.header.frame_id = initial_frame;
+    odomAftMapped.child_frame_id = body_frame;
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
 
@@ -648,8 +647,8 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
 
     if (tf_pub_en) {
         geometry_msgs::msg::TransformStamped trans;
-        trans.header.frame_id = "lidar_odom";
-        trans.child_frame_id = "base_lidar";
+        trans.header.frame_id = initial_frame;
+        trans.child_frame_id = body_frame;
         trans.header.stamp = get_ros_time(lidar_end_time);
         trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
         trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
@@ -667,7 +666,7 @@ void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
 {
     set_posestamp(msg_body_pose);
     msg_body_pose.header.stamp = get_ros_time(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
-    msg_body_pose.header.frame_id = "lidar_odom";
+    msg_body_pose.header.frame_id = initial_frame;
 
     /*** if path is too large, the rvis will crash ***/
     static int jjj = 0;
@@ -814,6 +813,8 @@ public:
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
+        this->declare_parameter<string>("common.initial_frame", "camera_init");
+        this->declare_parameter<string>("common.body_frame", "body");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
         this->declare_parameter<bool>("common.use_imu_odometry", true);
@@ -853,6 +854,8 @@ public:
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
+        this->get_parameter_or<string>("common.initial_frame", initial_frame, "camera_init");
+        this->get_parameter_or<string>("common.body_frame", body_frame, "body");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<bool>("common.use_imu_odometry", use_imu_odometry_, true);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
@@ -883,7 +886,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
         path.header.stamp = this->get_clock()->now();
-        path.header.frame_id ="lidar_odom";
+        path.header.frame_id =initial_frame;
 
         // /*** variables definition ***/
         // int effect_feat_num = 0, frame_num = 0;
@@ -1025,8 +1028,8 @@ private:
             // 发布imu 里程计
             nav_msgs::msg::Odometry imu_odometry;
             imu_odometry.header.stamp = msg_in->header.stamp;
-            imu_odometry.header.frame_id = "lidar_odom";
-            imu_odometry.child_frame_id = "base_lidar";
+            imu_odometry.header.frame_id = initial_frame;
+            imu_odometry.child_frame_id = body_frame;
             imu_odometry.pose.pose.position.x = imu_state.pos(0);
             imu_odometry.pose.pose.position.y = imu_state.pos(1);
             imu_odometry.pose.pose.position.z = imu_state.pos(2);
