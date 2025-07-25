@@ -816,6 +816,7 @@ public:
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
+        this->declare_parameter<bool>("common.use_imu_odometry", true);
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
         this->declare_parameter<double>("filter_size_map", 0.5);
@@ -839,7 +840,6 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
-        this->declare_parameter<bool>("use_imu_odometry", true);
 
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -854,6 +854,7 @@ public:
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
+        this->get_parameter_or<bool>("common.use_imu_odometry", use_imu_odometry_, true);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
@@ -878,7 +879,7 @@ public:
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
-        this->get_parameter_or<bool>("use_imu_odometry", use_imu_odometry_, true);
+
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
         path.header.stamp = this->get_clock()->now();
