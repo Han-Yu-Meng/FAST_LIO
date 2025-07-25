@@ -606,7 +606,7 @@ void set_posestamp(T & out)
     out.pose.orientation.y = geoQuat.y;
     out.pose.orientation.z = geoQuat.z;
     out.pose.orientation.w = geoQuat.w;
-    
+
 }
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
@@ -616,7 +616,23 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.child_frame_id = "base_lidar";
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
-    pubOdomAftMapped->publish(odomAftMapped);
+
+    // // 计算线速度
+    // vect3 vel_body = state_point.rot.conjugate() * state_point.vel;
+    // odomAftMapped.twist.twist.linear.x = vel_body(0);
+    // odomAftMapped.twist.twist.linear.y = vel_body(1);
+    // odomAftMapped.twist.twist.linear.z = vel_body(2);
+    //
+    // // 计算角速度
+    // static SO3 last_rot = SO3::Identity();
+    // SO3 delta_rot = state_point.rot * last_rot.conjugate();
+    // last_rot = state_point.rot;
+    // vect3 ang_vel_body = SO3::log(delta_rot); // TODO: 需要计算dt
+    // odomAftMapped.twist.twist.angular.x = ang_vel_body(0);
+    // odomAftMapped.twist.twist.angular.y = ang_vel_body(1);
+    // odomAftMapped.twist.twist.angular.z = ang_vel_body(2);
+
+    // 计算协方差
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
     {
@@ -628,6 +644,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i*6 + 4] = P(k, 1);
         odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
     }
+    pubOdomAftMapped->publish(odomAftMapped);
 
 //    geometry_msgs::msg::TransformStamped trans;
 //    trans.header.frame_id = "lidar_odom";
@@ -1043,14 +1060,20 @@ private:
             imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()[2];
             imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()[3];
 
-            // imu_state.vel 保存的是世界坐标系下的速度
+            // 计算线速度，注意imu_state.vel 保存的是世界坐标系下的速度
             vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel;
             imu_odometry.twist.twist.linear.x = vel_body(0);
             imu_odometry.twist.twist.linear.y = vel_body(1);
             imu_odometry.twist.twist.linear.z = vel_body(2);
-            imu_odometry.twist.twist.angular.x = ang_vel(0);
-            imu_odometry.twist.twist.angular.y = ang_vel(1);
-            imu_odometry.twist.twist.angular.z = ang_vel(2);
+
+            // 计算角速度，通过imu_state.rot的差分计算
+            static SO3 last_rot = SO3::Identity();
+            SO3 delta_rot = imu_state.rot * last_rot.conjugate();
+            last_rot = imu_state.rot;
+            vect3 omega = SO3::log(delta_rot) / dt;
+            imu_odometry.twist.twist.angular.x = omega(0);
+            imu_odometry.twist.twist.angular.y = omega(1);
+            imu_odometry.twist.twist.angular.z = omega(2);
 
             pubOdomAftMapped_->publish(imu_odometry);
         }
