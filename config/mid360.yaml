@@ -18,6 +18,7 @@
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
             use_imu_odometry: true             # true = 输出imu里程计，false = 输出lidar里程计
+            imu_window_size_ : 10       # imu 滑动窗口大小
 
         preprocess:
             lidar_type: 1                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 4 for any other pointcloud input
