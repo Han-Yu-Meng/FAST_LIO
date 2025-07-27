@@ -810,7 +810,7 @@ public:
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
         this->declare_parameter<bool>("publish.tf_en", false);
         this->declare_parameter<int>("max_iteration", 4);
-        this->declare_parameter<int>("common.imu_window_size_", 10);                            // 250727 szl imu_window_size_
+        this->declare_parameter<int>("common.imu_window_size", 10);                            // 250727 szl imu_window_size_
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
@@ -852,7 +852,7 @@ public:
         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
         this->get_parameter_or<bool>("publish.tf_en", tf_pub_en, false);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
-        this->get_parameter_or<int>("common.imu_window_size_", imu_window_size , 10);
+        this->get_parameter_or<int>("common.imu_window_size", imu_window_size , 10);
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
@@ -1211,101 +1211,62 @@ private:
         }
     }
 
-    void process_and_publish_imu_odometry(const sensor_msgs::msg::Imu::UniquePtr& msg_in,
-                                          double dt,
-                                          const input_ikfom& in,
-                                          bool use_imu_odometry){
-            if (!use_imu_odometry) return;
+    void process_and_publish_imu_odometry(
+        const sensor_msgs::msg::Imu::UniquePtr& msg_in,
+        double dt,
+        const input_ikfom& in,
+        bool use_imu_odometry
+    ) {
+        if (!use_imu_odometry) return;
 
-            kf_copy.predict(dt, p_imu->Q, in);
-            auto imu_state = kf_copy.get_x();
+        kf_copy.predict(dt, p_imu->Q, in);
+        auto imu_state = kf_copy.get_x();
 
-            // 发布imu 里程计
+        // 从IMU消息中获取原始角速度
+        Eigen::Vector3d current_ang_vel(
+            msg_in->angular_velocity.x,
+            msg_in->angular_velocity.y,
+            msg_in->angular_velocity.z
+        );
 
-            // 创建当前IMU里程计消息
-            nav_msgs::msg::Odometry current_odom;
-            current_odom.header.stamp = msg_in->header.stamp;
-            current_odom.header.frame_id = initial_frame;
-            current_odom.child_frame_id = body_frame;
+        // 对角速度进行滑动窗口平滑
+        imu_ang_vel_window_.push_back(current_ang_vel);
+        avg_ang_vel_ += current_ang_vel;
 
-            // 获取当前状态
-            Eigen::Vector3d current_pos = imu_state.pos;
-            Eigen::Vector4d current_rot_coeffs = imu_state.rot.coeffs();
-            vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel;
+        // 如果窗口已满，移除最旧的数据
+        if (imu_ang_vel_window_.size() > imu_window_size) {
+            avg_ang_vel_ -= imu_ang_vel_window_.front();
+            imu_ang_vel_window_.pop_front();
+        }
 
-            imu_odom_window_.push_back(current_odom);                       // push 滑动窗口 deque
+        // 计算平滑后的角速度
+        Eigen::Vector3d smoothed_ang_vel = avg_ang_vel_ / imu_ang_vel_window_.size();
 
-            // 如果窗口已满，移除最旧的数据
-            if (imu_odom_window_.size() > imu_window_size_) {
-                const auto& oldest = imu_odom_window_.front();
-                
-                // 从累加和中减去最旧的数据
-                avg_pos_ -= Eigen::Vector3d(
-                    oldest.pose.pose.position.x,
-                    oldest.pose.pose.position.y,
-                    oldest.pose.pose.position.z);
-                    
-                avg_rot_coeffs_ -= Eigen::Vector4d(
-                    oldest.pose.pose.orientation.x,
-                    oldest.pose.pose.orientation.y,
-                    oldest.pose.pose.orientation.z,
-                    oldest.pose.pose.orientation.w);
-                    
-                avg_vel_body_ -= Eigen::Vector3d(
-                    oldest.twist.twist.linear.x,
-                    oldest.twist.twist.linear.y,
-                    oldest.twist.twist.linear.z);
-                    
-                avg_ang_vel_ -= Eigen::Vector3d(
-                    oldest.twist.twist.angular.x,
-                    oldest.twist.twist.angular.y,
-                    oldest.twist.twist.angular.z);
-                    
-                imu_odom_window_.pop_front();                               // 前端出队
-            }
+        nav_msgs::msg::Odometry imu_odometry;
+        imu_odometry.header.stamp = msg_in->header.stamp;
+        imu_odometry.header.frame_id = initial_frame;
+        imu_odometry.child_frame_id = body_frame;
 
-            // 添加最新数据到累加和
-            avg_pos_ += current_pos;
-            avg_rot_coeffs_ += current_rot_coeffs;
-            avg_vel_body_ += vel_body;
-            avg_ang_vel_ += ang_vel;
+        imu_odometry.pose.pose.position.x = imu_state.pos(0);
+        imu_odometry.pose.pose.position.y = imu_state.pos(1);
+        imu_odometry.pose.pose.position.z = imu_state.pos(2);
+        imu_odometry.pose.pose.orientation.x = imu_state.rot.coeffs()(0);
+        imu_odometry.pose.pose.orientation.y = imu_state.rot.coeffs()(1);
+        imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()(2);
+        imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()(3);
 
-            // 计算平均值
-            size_t window_size = imu_odom_window_.size();
-            Eigen::Vector3d smoothed_pos = avg_pos_ / window_size;
-            Eigen::Vector4d smoothed_rot_coeffs = avg_rot_coeffs_ / window_size;
-            Eigen::Vector3d smoothed_vel_body = avg_vel_body_ / window_size;
-            Eigen::Vector3d smoothed_ang_vel = avg_ang_vel_ / window_size;
+        vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel;
+        imu_odometry.twist.twist.linear.x = vel_body(0);
+        imu_odometry.twist.twist.linear.y = vel_body(1);
+        imu_odometry.twist.twist.linear.z = vel_body(2);
 
-            // 归一化四元数
-            smoothed_rot_coeffs.normalize();
+        // 设置平滑后的角速度
+        imu_odometry.twist.twist.angular.x = smoothed_ang_vel(0);
+        imu_odometry.twist.twist.angular.y = smoothed_ang_vel(1);
+        imu_odometry.twist.twist.angular.z = smoothed_ang_vel(2);
 
-            // 准备发布
-            nav_msgs::msg::Odometry imu_odometry;
-            imu_odometry.header.stamp = msg_in->header.stamp;
-            imu_odometry.header.frame_id = initial_frame;
-            imu_odometry.child_frame_id = body_frame;
-
-            // 设置平滑后的位置和姿态
-            imu_odometry.pose.pose.position.x = smoothed_pos(0);
-            imu_odometry.pose.pose.position.y = smoothed_pos(1);
-            imu_odometry.pose.pose.position.z = smoothed_pos(2);
-            imu_odometry.pose.pose.orientation.x = smoothed_rot_coeffs(0);
-            imu_odometry.pose.pose.orientation.y = smoothed_rot_coeffs(1);
-            imu_odometry.pose.pose.orientation.z = smoothed_rot_coeffs(2);
-            imu_odometry.pose.pose.orientation.w = smoothed_rot_coeffs(3);
-
-            // 设置平滑后的速度
-            imu_odometry.twist.twist.linear.x = smoothed_vel_body(0);
-            imu_odometry.twist.twist.linear.y = smoothed_vel_body(1);
-            imu_odometry.twist.twist.linear.z = smoothed_vel_body(2);
-            
-            // 设置平滑后的角速度
-            imu_odometry.twist.twist.angular.x = smoothed_ang_vel(0);
-            imu_odometry.twist.twist.angular.y = smoothed_ang_vel(1);
-            imu_odometry.twist.twist.angular.z = smoothed_ang_vel(2);
-
-            pubOdomAftMapped_->publish(imu_odometry);
+        // 发布里程计
+        pubOdomAftMapped_->publish(imu_odometry);
     }
 
 private:
@@ -1335,11 +1296,9 @@ private:
     ofstream fout_pre, fout_out, fout_dbg;
 
     // 滑动窗口平滑所需变量
-    std::deque<nav_msgs::msg::Odometry> imu_odom_window_;
-    Eigen::Vector3d avg_pos_ = Eigen::Vector3d::Zero();             // 用于对 位置 (x,y,z) 求和取平均
-    Eigen::Vector4d avg_rot_coeffs_ = Eigen::Vector4d::Zero();      // 说是 imu 用四元数保存位姿
-    Eigen::Vector3d avg_vel_body_ = Eigen::Vector3d::Zero();        // 用于对 线速度（vx, vy, vz）求和取平均
-    Eigen::Vector3d avg_ang_vel_ = Eigen::Vector3d::Zero();         // 用于对 角速度 (wx,wy,wz) 求和取平均
+    int imu_window_size = 41 ; // 默认值
+    std::deque<Eigen::Vector3d> imu_ang_vel_window_;  // 仅存储角速度历史数据
+    Eigen::Vector3d avg_ang_vel_ = Eigen::Vector3d::Zero(); // 对角速度求和取平均
 };
 
 int main(int argc, char** argv)
