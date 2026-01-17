@@ -43,6 +43,7 @@ public:
   void initialize() override {
     logger->info("Initializing FastLIO Node...");
     mapper_ = std::make_shared<LaserMapping>(this);
+    mapper_->initialize();
 
     is_running_ = true;
     has_new_data_ = false;
@@ -99,7 +100,7 @@ private:
   }
 
   void mapping_worker_loop() {
-    logger->info("Backend mapping worker started (Timer Mode).");
+    logger->info("Backend mapping worker started.");
 
     while (is_running_) {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));

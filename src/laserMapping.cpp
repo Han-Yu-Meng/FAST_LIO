@@ -466,7 +466,7 @@ void set_posestamp(T & out)
 
 void publish_odometry_and_tf()
 {
-    if (fins_node->required<1>()) {
+    if (fins_node->required<3>()) {
         geometry_msgs::msg::TransformStamped trans;
         trans.header.frame_id = "camera_init";
         trans.child_frame_id = "body";
@@ -475,7 +475,7 @@ void publish_odometry_and_tf()
         trans.transform.translation.y = state_point.pos(1);
         trans.transform.translation.z = state_point.pos(2);
         trans.transform.rotation = geoQuat;
-        fins_node->send<1>(trans, fins::now());
+        fins_node->send<3>(trans, fins::now());
     }
 
     if (fins_node->required<2>()) {
@@ -684,9 +684,9 @@ void initialize() {
 
     fins::ParamLoader preprocess("FastLIO.preprocess");
     p_pre->blind = preprocess.get("blind", 0.01);
-    p_pre->lidar_type = preprocess.get("lidar_type", AVIA);
+    p_pre->lidar_type = static_cast<LID_TYPE>(preprocess.get<int>("lidar_type", AVIA));
     p_pre->N_SCANS = preprocess.get("scan_line", 16);
-    p_pre->time_unit = preprocess.get("timestamp_unit", US);
+    p_pre->time_unit = static_cast<TIME_UNIT>(preprocess.get<int>("timestamp_unit", US));
     p_pre->SCAN_RATE = preprocess.get("scan_rate", 10);
     p_pre->point_filter_num = preprocess.get("point_filter_num", 2);
     p_pre->feature_enabled = preprocess.get("feature_extract_enable", false);

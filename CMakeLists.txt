@@ -10,6 +10,9 @@ find_package(PCL QUIET)
 find_package(OpenMP REQUIRED)
 find_package(Sophus REQUIRED) 
 
+add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+add_link_options(-fsanitize=address)
+
 add_compile_options(
     -Wno-reorder
     -Wno-unused-parameter
