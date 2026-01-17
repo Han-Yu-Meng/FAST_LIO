@@ -3,8 +3,8 @@
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
 
-Preprocess::Preprocess()
-  :feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+Preprocess::Preprocess(fins::Node* fins_node_)
+  :fins_node(fins_node_), feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
   inf_bound = 10;
   N_SCANS   = 6;
@@ -41,13 +41,13 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
   point_filter_num = pfilt_num;
 }
 
-void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
+void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {  
   avia_handler(msg);
   *pcl_out = pl_surf;
 }
 
-void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
+void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
   switch (time_unit)
   {
@@ -83,18 +83,17 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
     break;
   
   default:
-    printf("Error LiDAR Type");
+    fins_node->logger->error("Unsupported lidar type");
     break;
   }
   *pcl_out = pl_surf;
 }
 
-void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
+void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg)
 {
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
-  double t1 = omp_get_wtime();
   int plsize = msg->point_num;
   // cout<<"plsie: "<<plsize<<endl;
 
@@ -156,7 +155,7 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
       // pl_surf += pl;
     }
     time += omp_get_wtime() - t0;
-    printf("Feature extraction time: %lf \n", time / count);
+    fins_node->logger->info("Feature extraction time: {} s", time / count);
   }
   else
   {
@@ -186,7 +185,7 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
   }
 }
 
-void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
   pl_surf.clear();
   pl_corn.clear();
@@ -252,9 +251,7 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   }
   else
   {
-    double time_stamp = msg->header.stamp.toSec();
-    // cout << "===================================" << endl;
-    // printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
+    double time_stamp = get_time_sec(msg->header.stamp);
     for (int i = 0; i < pl_orig.points.size(); i++)
     {
       if (i % point_filter_num != 0) continue;
@@ -277,11 +274,9 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
       pl_surf.points.push_back(added_pt);
     }
   }
-  // pub_func(pl_surf, pub_full, msg->header.stamp);
-  // pub_func(pl_surf, pub_corn, msg->header.stamp);
 }
 
-void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
     pl_surf.clear();
     pl_corn.clear();
@@ -348,7 +343,6 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
           double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.2957;
           if (is_first[layer])
           {
-            // printf("layer: %d; is first: %d", layer, is_first[layer]);
               yaw_fp[layer]=yaw_angle;
               is_first[layer]=false;
               added_pt.curvature = 0.0;
@@ -419,7 +413,6 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
           if (is_first[layer])
           {
-            // printf("layer: %d; is first: %d", layer, is_first[layer]);
               yaw_fp[layer]=yaw_angle;
               is_first[layer]=false;
               added_pt.curvature = 0.0;
@@ -455,7 +448,7 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
     }
 }
 
-void Preprocess::sim_handler(const sensor_msgs::PointCloud2::ConstPtr &msg) {
+void Preprocess::sim_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
     pl_surf.clear();
     pl_full.clear();
     pcl::PointCloud<pcl::PointXYZI> pl_orig;
@@ -486,7 +479,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   int plsize2;
   if(plsize == 0)
   {
-    printf("something wrong\n");
+    fins_node->logger->error("Point cloud size is zero in give_feature");
     return;
   }
   uint head = 0;
@@ -794,22 +787,13 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   }
 }
 
-void Preprocess::pub_func(PointCloudXYZI &pl, const ros::Time &ct)
-{
-  pl.height = 1; pl.width = pl.size();
-  sensor_msgs::PointCloud2 output;
-  pcl::toROSMsg(pl, output);
-  output.header.frame_id = "livox";
-  output.header.stamp = ct;
-}
-
 int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex, Eigen::Vector3d &curr_direct)
 {
   double group_dis = disA*types[i_cur].range + disB;
   group_dis = group_dis * group_dis;
   // i_nex = i_cur;
 
-  double two_dis;
+  double two_dis = 0;
   vector<double> disarr;
   disarr.reserve(20);
 

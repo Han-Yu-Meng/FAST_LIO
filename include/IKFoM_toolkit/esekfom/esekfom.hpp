@@ -39,7 +39,7 @@
 #include <vector>
 #include <cstdlib>
 
-#include <boost/bind.hpp>
+#include <boost/bind/bind.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <Eigen/Dense>
@@ -56,6 +56,7 @@
 
 
 namespace esekfom {
+using namespace boost::placeholders;
 
 using namespace Eigen;
 
@@ -126,7 +127,9 @@ public:
 	typedef measurement measurementModel_share(state &, share_datastruct<state, measurement, measurement_noise_dof> &);
 	typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn(state &, bool &);
 	//typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
-	typedef void measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
+	// typedef void measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
+	using measurementModel_dyn_share = std::function<void(state &, dyn_share_datastruct<scalar_type> &)>;
+
 	typedef Eigen::Matrix<scalar_type ,l, n> measurementMatrix1(state &, bool&);
 	typedef Eigen::Matrix<scalar_type , Eigen::Dynamic, n> measurementMatrix1_dyn(state &, bool&);
 	typedef Eigen::Matrix<scalar_type ,l, measurement_noise_dof> measurementMatrix2(state &, bool&);
@@ -419,7 +422,7 @@ public:
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 3; i++){
 					seg_SO3(i) = dx(idx+i);
 				}
@@ -439,7 +442,7 @@ public:
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 2; i++){
 					seg_S2(i) = dx(idx + i);
 				}
@@ -630,7 +633,7 @@ public:
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 3; i++){
 					seg_SO3(i) = dx(idx+i);
 				}
@@ -650,7 +653,7 @@ public:
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 2; i++){
 					seg_S2(i) = dx(idx + i);
 				}
@@ -807,7 +810,7 @@ public:
 		state x_propagated = x_;
 		cov P_propagated = P_;
 		int dof_Measurement;
-		int dof_Measurement_noise = R.rows();
+		// int dof_Measurement_noise = R.rows();
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			valid = true;
@@ -834,7 +837,7 @@ public:
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 3; i++){
 					seg_SO3(i) = dx(idx+i);
 				}
@@ -853,7 +856,7 @@ public:
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 2; i++){
 					seg_S2(i) = dx(idx + i);
 				}
@@ -1007,7 +1010,7 @@ public:
 		state x_propagated = x_;
 		cov P_propagated = P_;
 		int dof_Measurement;
-		int dof_Measurement_noise;
+		// int dof_Measurement_noise;
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
@@ -1025,7 +1028,7 @@ public:
 			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_v = dyn_share.h_v;
 		#endif	
 			dof_Measurement = h_x.rows();
-			dof_Measurement_noise = dyn_share.R.rows();
+			// dof_Measurement_noise = dyn_share.R.rows();
 			vectorized_state dx, dx_new;
 			x_.boxminus(dx, x_propagated);
 			dx_new = dx;
@@ -1039,7 +1042,7 @@ public:
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 3; i++){
 					seg_SO3(i) = dx(idx+i);
 				}
@@ -1058,7 +1061,7 @@ public:
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 2; i++){
 					seg_S2(i) = dx(idx + i);
 				}
@@ -1214,7 +1217,7 @@ public:
 		state x_propagated = x_;
 		cov P_propagated = P_;
 		int dof_Measurement;
-		int dof_Measurement_noise;
+		// int dof_Measurement_noise;
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			valid = true;
@@ -1228,7 +1231,7 @@ public:
 		#endif	
 			measurement_runtime h_ = h_runtime(x_, valid);
 			dof_Measurement = measurement_runtime::DOF;
-			dof_Measurement_noise = R.rows();
+			// dof_Measurement_noise = R.rows();
 			vectorized_state dx, dx_new;
 			x_.boxminus(dx, x_propagated);
 			dx_new = dx;
@@ -1242,7 +1245,7 @@ public:
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 3; i++){
 					seg_SO3(i) = dx(idx+i);
 				}
@@ -1261,7 +1264,7 @@ public:
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 2; i++){
 					seg_S2(i) = dx(idx + i);
 				}
@@ -1420,7 +1423,7 @@ public:
 		state x_propagated = x_;
 		cov P_propagated = P_;
 		int dof_Measurement;
-		int dof_Measurement_noise;
+		// int dof_Measurement_noise;
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
@@ -1436,7 +1439,7 @@ public:
 			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_v = dyn_share.h_v;
 		#endif	
 			dof_Measurement = measurement_runtime::DOF;
-			dof_Measurement_noise = dyn_share.R.rows();
+			// dof_Measurement_noise = dyn_share.R.rows();
 			vectorized_state dx, dx_new;
 			x_.boxminus(dx, x_propagated);
 			dx_new = dx;
@@ -1450,7 +1453,7 @@ public:
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 3; i++){
 					seg_SO3(i) = dx(idx+i);
 				}
@@ -1469,7 +1472,7 @@ public:
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 2; i++){
 					seg_S2(i) = dx(idx + i);
 				}
@@ -1616,7 +1619,7 @@ public:
 	}
 	
 	//iterated error state EKF update modified for one specific system.
-	void update_iterated_dyn_share_modified(double R, double &solve_time) {
+	void update_iterated_dyn_share_modified(double R) {
 		
 		dyn_share_datastruct<scalar_type> dyn_share;
 		dyn_share.valid = true;
@@ -1660,7 +1663,7 @@ public:
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 3; i++){
 					seg_SO3(i) = dx(idx+i);
 				}
@@ -1679,7 +1682,7 @@ public:
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
 				int idx = (*it).first;
-				int dim = (*it).second;
+				// int dim = (*it).second;
 				for(int i = 0; i < 2; i++){
 					seg_S2(i) = dx(idx + i);
 				}
@@ -1923,10 +1926,8 @@ public:
 				//{
 					P_ = L_ - K_x.template block<n, 12>(0, 0) * P_.template block<12, n>(0, 0);
 				//}
-				solve_time += omp_get_wtime() - solve_start;
 				return;
 			}
-			solve_time += omp_get_wtime() - solve_start;
 		}
 	}
 
@@ -1976,7 +1977,7 @@ private:
 	measurementMatrix2_dyn *h_v_dyn;
 
 	measurementModel_share *h_share;
-	measurementModel_dyn_share *h_dyn_share;
+	measurementModel_dyn_share h_dyn_share;
 
 	int maximum_iter = 0;
 	scalar_type limit[n];
