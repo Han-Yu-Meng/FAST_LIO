@@ -1,9 +1,6 @@
 name: "FAST_LIO"
 version: "0.1.0"
-description: "This is a modified version of LOAM which is original algorithm
-    is described in the following paper:
-    J. Zhang and S. Singh. LOAM: Lidar Odometry and Mapping in Real-time.
-      Robotics: Science and Systems Conference (RSS). Berkeley, CA, July 2014."
+description: "FAST-LIO (Fast LiDAR-Inertial Odometry) is a computationally efficient and robust LiDAR-inertial odometry package."
 maintainers:
   - name: "Ji Zhang"
     email: "zhangji@cmu.edu"
