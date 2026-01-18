@@ -72,21 +72,21 @@ public:
   void on_lidar(const fins::Msg<sensor_msgs::msg::PointCloud2> &msg) {
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "Lidar Callback");
-      mapper_->standard_pcl_cbk(msg.data);
+      mapper_->standard_pcl_cbk(msg.ptr());
     }
   }
 
   void on_livox(const fins::Msg<livox_ros_driver2::msg::CustomMsg> &msg) {
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "Livox Callback");
-      mapper_->livox_pcl_cbk(msg.data);
+      mapper_->livox_pcl_cbk(msg.ptr());
     }
   }
 
   void on_imu(const fins::Msg<sensor_msgs::msg::Imu> &msg) {
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "IMU Callback");
-      mapper_->imu_cbk(msg.data);
+      mapper_->imu_cbk(msg.ptr());
     }
   }
 

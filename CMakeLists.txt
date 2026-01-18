@@ -2,16 +2,9 @@ cmake_minimum_required(VERSION 3.16)
 
 project(FAST_LIO)
 
-find_package(nav_msgs QUIET)
-find_package(sensor_msgs QUIET)
-find_package(pcl_conversions QUIET)
-find_package(livox_ros_driver2 QUIET)
 find_package(PCL QUIET)
 find_package(OpenMP REQUIRED)
-find_package(Sophus REQUIRED) 
-
-add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
-add_link_options(-fsanitize=address)
+find_package(Sophus REQUIRED)
 
 add_compile_options(
     -Wno-reorder
@@ -24,13 +17,12 @@ add_compile_options(
 
 add_definitions(-DBOOST_BIND_GLOBAL_PLACEHOLDERS)
 
-add_library(${PROJECT_NAME} SHARED
+fins_add_node(${PROJECT_NAME}
   src/nodes.cpp
   src/preprocess.cpp
   include/ikd-Tree/ikd_Tree.cpp
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE fins_sdk)
 target_include_directories(${PROJECT_NAME} PUBLIC 
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -38,34 +30,13 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     ${PCL_INCLUDE_DIRS}
 )
 
-if(TARGET livox_ros_driver2::livox_ros_driver2)
-    target_link_libraries(${PROJECT_NAME} PRIVATE livox_ros_driver2::livox_ros_driver2)
-else()
-    target_include_directories(${PROJECT_NAME} PRIVATE ${livox_ros_driver2_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${livox_ros_driver2_LIBRARIES})
-endif()
-
-if(TARGET sensor_msgs::sensor_msgs)
-    target_link_libraries(${PROJECT_NAME} PRIVATE sensor_msgs::sensor_msgs)
-else()
-    target_include_directories(${PROJECT_NAME} PRIVATE ${sensor_msgs_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${sensor_msgs_LIBRARIES})
-endif()
-
-if(TARGET nav_msgs::nav_msgs)
-    target_link_libraries(${PROJECT_NAME} PRIVATE nav_msgs::nav_msgs)
-else()
-    target_include_directories(${PROJECT_NAME} PRIVATE ${nav_msgs_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${nav_msgs_LIBRARIES})
-endif()
-
-if(TARGET pcl_conversions::pcl_conversions)
-    target_link_libraries(${PROJECT_NAME} PRIVATE pcl_conversions::pcl_conversions)
-else()
-    target_include_directories(${PROJECT_NAME} PRIVATE ${pcl_conversions_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${pcl_conversions_LIBRARIES})
-endif()
-
+fins_link_ros_dependencies(${PROJECT_NAME}
+    geometry_msgs
+    nav_msgs
+    sensor_msgs
+    pcl_conversions
+    livox_ros_driver2
+)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     OpenMP::OpenMP_CXX
