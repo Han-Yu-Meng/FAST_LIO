@@ -39,7 +39,6 @@
 #include <fstream>
 #include <csignal>
 #include <unistd.h>
-#include <Python.h>
 #include <so3_math.h>
 #include <Eigen/Core>
 #include "IMU_Processing.hpp"
