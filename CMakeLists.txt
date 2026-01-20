@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(FAST_LIO)
 
-find_package(PCL QUIET)
+find_package(PCL    REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(Sophus REQUIRED)
 
