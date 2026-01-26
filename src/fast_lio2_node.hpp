@@ -26,18 +26,20 @@ public:
     set_description("Fast LIO-2 SLAM Node");
     set_category("SLAM");
 
-    register_input<0, sensor_msgs::msg::Imu>("imu", &FastLIO::on_imu);
+    register_input<sensor_msgs::msg::Imu>("imu", &FastLIO::on_imu);
 
-    register_input<1, livox_ros_driver2::msg::CustomMsg>("lidar",
+    register_input<livox_ros_driver2::msg::CustomMsg>("lidar",
                                                          &FastLIO::on_livox);
 
-    register_input<2, sensor_msgs::msg::PointCloud2>("lidar_standard",
+    register_input<sensor_msgs::msg::PointCloud2>("lidar_standard",
                                                      &FastLIO::on_lidar);
 
-    register_output<0, sensor_msgs::msg::PointCloud2>("cloud");
-    register_output<1, nav_msgs::msg::Path>("path");
-    register_output<2, nav_msgs::msg::Odometry>("odometry");
-    register_output<3, geometry_msgs::msg::TransformStamped>("transform");
+    register_output<sensor_msgs::msg::PointCloud2>("cloud");
+    register_output<nav_msgs::msg::Path>("path");
+    register_output<nav_msgs::msg::Odometry>("odometry");
+    register_output<geometry_msgs::msg::TransformStamped>("transform");
+
+    register_parameter<std::string>("base_frame", &FastLIO::set_base_frame, "map");
   }
 
   void initialize() override {
@@ -72,6 +74,7 @@ public:
   void on_lidar(const fins::Msg<sensor_msgs::msg::PointCloud2> &msg) {
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "Lidar Callback");
+      // logger->info("Received standard lidar point cloud with {} points.", msg->width * msg->height);
       mapper_->standard_pcl_cbk(msg.ptr());
     }
   }
@@ -87,6 +90,12 @@ public:
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "IMU Callback");
       mapper_->imu_cbk(msg.ptr());
+    }
+  }
+
+  void set_base_frame(const std::string &frame) {
+    if (mapper_) {
+      mapper_->set_base_frame(frame);
     }
   }
 

@@ -240,6 +240,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
     mtx_buffer.lock();
     scan_count ++;
+    // fins_node->logger->info("Received standard lidar point cloud with timestamp {}", get_time_sec(msg->header.stamp));
     if (get_time_sec(msg->header.stamp) < last_timestamp_lidar)
     {
         fins_node->logger->error("lidar loop back, clear buffer");
@@ -292,6 +293,8 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg)
 
 void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in) 
 {
+    // fins_node->logger->info("Received IMU message with timestamp {}", get_time_sec(msg_in->header.stamp));
+
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
     msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
@@ -316,6 +319,12 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+}
+
+std::string base_frame = "odom";
+
+void set_base_frame(const std::string &frame){
+    base_frame = frame;
 }
 
 double lidar_mean_scantime = 0.0;
@@ -429,7 +438,7 @@ PointCloudXYZI::Ptr pcl_wait_save{new PointCloudXYZI()};
 
 void publish_frame_world()
 {
-    if(fins_node->required<0>())
+    if(fins_node->required("cloud"))
     {
         PointCloudXYZI::Ptr laserCloudFullRes(feats_undistort);
         int size = laserCloudFullRes->points.size();
@@ -445,8 +454,8 @@ void publish_frame_world()
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = "camera_init";
-        fins_node->send<0>(laserCloudmsg, fins::now());
+        laserCloudmsg.header.frame_id = base_frame;
+        fins_node->send("cloud", laserCloudmsg, fins::now());
     }
 }
 
@@ -465,36 +474,36 @@ void set_posestamp(T & out)
 
 void publish_odometry_and_tf()
 {
-    if (fins_node->required<3>()) {
+    if (fins_node->required("transform")) {
         geometry_msgs::msg::TransformStamped trans;
-        trans.header.frame_id = "camera_init";
+        trans.header.frame_id = base_frame;
         trans.child_frame_id = "body";
         trans.header.stamp = get_ros_time(lidar_end_time);
         trans.transform.translation.x = state_point.pos(0);
         trans.transform.translation.y = state_point.pos(1);
         trans.transform.translation.z = state_point.pos(2);
         trans.transform.rotation = geoQuat;
-        fins_node->send<3>(trans, fins::now());
+        fins_node->send("transform", trans, fins::now());
     }
 
-    if (fins_node->required<2>()) {
-        odomAftMapped.header.frame_id = "camera_init";
+    if (fins_node->required("odometry")) {
+        odomAftMapped.header.frame_id = base_frame;
         odomAftMapped.child_frame_id = "body";
         odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
         set_posestamp(odomAftMapped.pose);
-        fins_node->send<2>(odomAftMapped, fins::now());
+        fins_node->send("odometry", odomAftMapped, fins::now());
     }
 }
 
 void publish_path()
 {
-    if (fins_node->required<1>()) {
+    if (fins_node->required("path")) {
         set_posestamp(msg_body_pose);
         msg_body_pose.header.stamp = get_ros_time(lidar_end_time);
-        msg_body_pose.header.frame_id = "camera_init";
+        msg_body_pose.header.frame_id = base_frame;
 
         path.poses.push_back(msg_body_pose);
-        fins_node->send<1>(path, fins::now());
+        fins_node->send("path", path, fins::now());
     }
 }
 
