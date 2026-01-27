@@ -240,7 +240,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
     mtx_buffer.lock();
     scan_count ++;
-    // fins_node->logger->info("Received standard lidar point cloud with timestamp {}", get_time_sec(msg->header.stamp));
+    // fins_node->logger->info("Received standard lidar point cloud with timestamp {}, points {}", get_time_sec(msg->header.stamp), msg->width * msg->height);
     if (get_time_sec(msg->header.stamp) < last_timestamp_lidar)
     {
         fins_node->logger->error("lidar loop back, clear buffer");
@@ -345,7 +345,7 @@ bool sync_packages(MeasureGroup &meas)
         if (meas.lidar->points.size() <= 1) // time too little
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
-            fins_node->logger->warn("Too few input point cloud!\n");
+            fins_node->logger->warn("Too few input point cloud!");
         }
         else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
         {
