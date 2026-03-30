@@ -413,12 +413,6 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
     process_and_publish_imu_odometry(msg_in, dt, in, use_imu_odometry_);
 }
 
-std::string base_frame = "odom";
-
-void set_base_frame(const std::string &frame){
-    base_frame = frame;
-}
-
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
@@ -546,7 +540,7 @@ void publish_frame_world()
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = base_frame;
+        laserCloudmsg.header.frame_id = initial_frame;
         fins_node->send("cloud", laserCloudmsg, fins::now());
     }
 }
@@ -611,7 +605,7 @@ void publish_path()
     if (fins_node->required("path")) {
         set_posestamp(msg_body_pose);
         msg_body_pose.header.stamp = get_ros_time(lidar_end_time);
-        msg_body_pose.header.frame_id = base_frame;
+        msg_body_pose.header.frame_id = initial_frame;
 
         path.poses.push_back(msg_body_pose);
         fins_node->send("path", path, fins::now());

@@ -37,9 +37,6 @@ public:
     register_output<sensor_msgs::msg::PointCloud2>("cloud");
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
-    register_output<geometry_msgs::msg::TransformStamped>("transform");
-
-    register_parameter<std::string>("base_frame", &FastLIO::set_base_frame, "map");
   }
 
   void initialize() override {
@@ -90,12 +87,6 @@ public:
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "IMU Callback");
       mapper_->imu_cbk(msg.ptr());
-    }
-  }
-
-  void set_base_frame(const std::string &frame) {
-    if (mapper_) {
-      mapper_->set_base_frame(frame);
     }
   }
 
