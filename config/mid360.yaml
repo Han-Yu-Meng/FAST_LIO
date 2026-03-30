@@ -1,35 +1,39 @@
-common:
-    lid_topic:  "/livox/lidar"
-    imu_topic:  "/livox/imu"
-    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
-    time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
-                                  # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+FastLIO: 
+  feature_extract_enable: false  # 是否开启特征提取。FastLIO 默认通常使用原始点云，设为 false 表示跳过提取边缘/平面特征的步骤
+  point_filter_num: 3            # 预处理时点云降采样间隔。
+  max_iteration: 3               # 卡尔曼滤波（IESKF）在单次更新中的最大迭代次数
+  filter_size_surf: 0.4          # 地图面点（Surface）降采样的体素大小（单位：米）。用于控制地图的稀疏程度
+  filter_size_map: 0.4           # ikd-Tree（增量式KD树）全局地图的体素降采样大小（单位：米）
+  cube_side_length: 500.0        # 局部地图构建的立方体边长（单位：米）。算法只维护这个范围内的局部地图，用于状态估计，超出范围的旧点会被移除
 
-preprocess:
-    lidar_type: 1                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 
-    scan_line: 4
+  common:
+    initial_frame: "lidar_odom"             # 初始化的时候位于的坐标系
+    body_frame: "livox_frame_192_168_1_187" # 雷达位于的坐标系
+    time_sync_en: false                     # 是否开启软件时间同步。如果硬件（LiDAR和IMU）已经通过 PTP 或 PPS 同步，这里设为 false
+    time_offset_lidar_to_imu: 0.0
+    use_imu_odometry: true                  # true = 输出imu里程计，false = 输出lidar里程计
+    imu_window_size: 200                    # imu 滑动窗口大小
+
+
+  preprocess:
     blind: 0.5
-
-mapping:
-    acc_cov: 0.1
-    gyr_cov: 0.1
-    b_acc_cov: 0.0001
-    b_gyr_cov: 0.0001
-    fov_degree:    360
-    det_range:     100.0
-    extrinsic_est_en:  false      # true: enable the online estimation of IMU-LiDAR extrinsic
-    extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
-    extrinsic_R: [ 1, 0, 0,
-                   0, 1, 0,
-                   0, 0, 1]
-
-publish:
-    path_en:  false
-    scan_publish_en:  true       # false: close all the point cloud output
-    dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
-    scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
-
-pcd_save:
-    pcd_save_en: true
-    interval: -1                 # how many LiDAR frames saved in each pcd file; 
-                                 # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+    lidar_type: 1 # AVIA = 1, VELO16 = 2, OUST64 = 3, MARSIM = 4
+    scan_line: 4
+    timestamp_unit: 3 # SEC = 0, MS = 1, US = 2, NS = 3
+    scan_rate: 10
+    point_filter_num: 1
+    feature_extract_enable: false
+    
+  mapping:
+    acc_cov: 0.1         # IMU 加速度计的测量噪声协方差（反映传感器的精度，值越小越信任传感器数据）
+    gyr_cov: 0.1         # IMU 陀螺仪的测量噪声协方差
+    b_acc_cov: 0.0001    # 加速度计零偏（Bias）的随机游走噪声协方差（反映零偏随时间漂移的速度）
+    b_gyr_cov: 0.0001    # 陀螺仪零偏（Bias）的随机游走噪声协方差
+    fov_degree:    360.0 # 激光雷达的视场角（FOV），单位：度
+    det_range:     100.0 # 激光雷达的最大有效探测距离，单位：米
+    
+    extrinsic_est_en:  false   # 是否开启在线外参估计。True 表示算法会在运行中自动微调 LiDAR 和 IMU 之间的相对位姿
+    extrinsic_T: [ -0.011, -0.02329, 0.04412 ] # 外参平移向量 [x, y, z]，单位：米。即 LiDAR 坐标系原点在 IMU 坐标系下的位置
+    extrinsic_R: [1, 0.0, 0,
+                   0.0,    1.0, 0.0,
+                  0, 0.0, 1 ]
