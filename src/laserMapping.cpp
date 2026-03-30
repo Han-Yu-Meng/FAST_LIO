@@ -38,6 +38,7 @@
 #include <thread>
 #include <fstream>
 #include <csignal>
+#include <chrono>
 #include <unistd.h>
 #include <so3_math.h>
 #include <Eigen/Core>
@@ -60,6 +61,7 @@
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
+#define PUBFRAME_PERIOD     (20)
 
 class LaserMapping {
 
@@ -71,18 +73,24 @@ double time_diff_lidar_to_imu = 0.0;
 mutex mtx_buffer;
 condition_variable sig_buffer;
 
+string initial_frame, body_frame;
+
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
-int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0;
+int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, scan_body_pub_en = false, time_sync_en = false;
 bool extrinsic_est_en = false;
 int lidar_type;
+bool use_imu_odometry_ = true;
+int imu_window_size = 200;
+std::deque<Eigen::Vector3d> imu_ang_vel_window_;
+Eigen::Vector3d avg_ang_vel_ = Eigen::Vector3d::Zero();
 
 vector<vector<int>>  pointSearchInd_surf; 
 vector<BoxPointType> cub_needrm;
@@ -117,6 +125,7 @@ M3D Lidar_R_wrt_IMU{Eye3d};
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
+esekfom::esekf<state_ikfom, 12, input_ikfom> kf_copy;
 state_ikfom state_point;
 vect3 pos_lid;
 
@@ -291,9 +300,68 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg)
     sig_buffer.notify_all();
 }
 
+void process_and_publish_imu_odometry(
+    const sensor_msgs::msg::Imu::ConstSharedPtr& msg_in,
+    double dt,
+    const input_ikfom& in,
+    bool use_imu_odometry
+) {
+    if (!use_imu_odometry) return;
+
+    kf_copy.predict(dt, p_imu->Q, in);
+    auto imu_state = kf_copy.get_x();
+
+    // 从IMU消息中获取原始角速度
+    Eigen::Vector3d current_ang_vel(
+        msg_in->angular_velocity.x,
+        msg_in->angular_velocity.y,
+        msg_in->angular_velocity.z
+    );
+
+    // 对角速度进行滑动窗口平滑
+    imu_ang_vel_window_.push_back(current_ang_vel);
+    avg_ang_vel_ += current_ang_vel;
+
+    // 如果窗口已满，移除最旧的数据
+    if (imu_ang_vel_window_.size() > imu_window_size) {
+        avg_ang_vel_ -= imu_ang_vel_window_.front();
+        imu_ang_vel_window_.pop_front();
+    }
+
+    // 计算平滑后的角速度
+    Eigen::Vector3d smoothed_ang_vel = avg_ang_vel_ / imu_ang_vel_window_.size();
+
+    nav_msgs::msg::Odometry imu_odometry;
+    imu_odometry.header.stamp = msg_in->header.stamp;
+    imu_odometry.header.frame_id = initial_frame;
+    imu_odometry.child_frame_id = body_frame;
+
+    imu_odometry.pose.pose.position.x = imu_state.pos(0);
+    imu_odometry.pose.pose.position.y = imu_state.pos(1);
+    imu_odometry.pose.pose.position.z = imu_state.pos(2);
+    imu_odometry.pose.pose.orientation.x = imu_state.rot.coeffs()(0);
+    imu_odometry.pose.pose.orientation.y = imu_state.rot.coeffs()(1);
+    imu_odometry.pose.pose.orientation.z = imu_state.rot.coeffs()(2);
+    imu_odometry.pose.pose.orientation.w = imu_state.rot.coeffs()(3);
+
+    vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel;
+    imu_odometry.twist.twist.linear.x = vel_body(0);
+    imu_odometry.twist.twist.linear.y = vel_body(1);
+    imu_odometry.twist.twist.linear.z = vel_body(2);
+
+    // 设置平滑后的角速度
+    imu_odometry.twist.twist.angular.x = smoothed_ang_vel(0);
+    imu_odometry.twist.twist.angular.y = smoothed_ang_vel(1);
+    imu_odometry.twist.twist.angular.z = smoothed_ang_vel(2);
+
+    // 发布里程计
+    publish_odometry(imu_odometry);
+}
+
 void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in) 
 {
     // fins_node->logger->info("Received IMU message with timestamp {}", get_time_sec(msg_in->header.stamp));
+    publish_count ++;
 
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
@@ -314,11 +382,35 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
         imu_buffer.clear();
     }
 
+    double dt = 0.0;
+    if (last_timestamp_imu < 0.0) {
+        dt = 0.01;
+    } else {
+        dt = timestamp - last_timestamp_imu;
+    }
+
     last_timestamp_imu = timestamp;
 
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+
+    if (p_imu->imu_need_init()) {
+        return;
+    }
+
+    V3D ang_vel, acc;
+    ang_vel << msg_in->angular_velocity.x, msg_in->angular_velocity.y, msg_in->angular_velocity.z;
+    acc << msg_in->linear_acceleration.x, msg_in->linear_acceleration.y, msg_in->linear_acceleration.z;
+    
+    // Normalize acc if possible, but we need mean_acc from imu_process
+    acc = acc * G_m_s2 / p_imu->get_mean_acc().norm();
+
+    input_ikfom in;
+    in.acc = acc;
+    in.gyro = ang_vel;
+
+    process_and_publish_imu_odometry(msg_in, dt, in, use_imu_odometry_);
 }
 
 std::string base_frame = "odom";
@@ -472,25 +564,44 @@ void set_posestamp(T & out)
     
 }
 
-void publish_odometry_and_tf()
+void publish_odometry(const nav_msgs::msg::Odometry &odom)
 {
-    if (fins_node->required("transform")) {
-        geometry_msgs::msg::TransformStamped trans;
-        trans.header.frame_id = base_frame;
-        trans.child_frame_id = "body";
-        trans.header.stamp = get_ros_time(lidar_end_time);
-        trans.transform.translation.x = state_point.pos(0);
-        trans.transform.translation.y = state_point.pos(1);
-        trans.transform.translation.z = state_point.pos(2);
-        trans.transform.rotation = geoQuat;
-        fins_node->send("transform", trans, fins::now());
-    }
-
     if (fins_node->required("odometry")) {
-        odomAftMapped.header.frame_id = base_frame;
-        odomAftMapped.child_frame_id = "body";
+        fins_node->send("odometry", odom, fins::now());
+    }
+}
+
+void publish_odometry()
+{
+    if (fins_node->required("odometry")) {
+        odomAftMapped.header.frame_id = initial_frame;
+        odomAftMapped.child_frame_id = body_frame;
         odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
         set_posestamp(odomAftMapped.pose);
+
+        // 计算线速度
+        vect3 vel_body = state_point.rot.conjugate() * state_point.vel;
+        odomAftMapped.twist.twist.linear.x = vel_body(0);
+        odomAftMapped.twist.twist.linear.y = vel_body(1);
+        odomAftMapped.twist.twist.linear.z = vel_body(2);
+
+        // 计算角速度
+        static double last_lidar_end_time = 0;
+        static SO3 last_rot = SO3::Identity();
+        SO3 delta_rot = last_rot.conjugate() * state_point.rot;
+        vect3 ang_vel_body;
+        ang_vel_body.setZero();
+        if (last_lidar_end_time > 0) {
+            double dt = lidar_end_time - last_lidar_end_time;
+            ang_vel_body = SO3::log(delta_rot) / dt;
+        }
+        last_rot = state_point.rot;
+        last_lidar_end_time = lidar_end_time;
+
+        odomAftMapped.twist.twist.angular.x = ang_vel_body(0);
+        odomAftMapped.twist.twist.angular.y = ang_vel_body(1);
+        odomAftMapped.twist.twist.angular.z = ang_vel_body(2);
+
         fins_node->send("odometry", odomAftMapped, fins::now());
     }
 }
@@ -631,23 +742,6 @@ LaserMapping(fins::Node* node_ptr)
     p_imu = make_shared<ImuProcess>(fins_node);
 }
 
-// void init_save_data() {
-//   fins::ParamLoader save_data("FastLIO.save_data");
-//   save_enabled = save_data.get("enable", false);
-//   if (!save_enabled)
-//     return;
-//   save_directory = save_data.get<std::string>("dir", "");
-//   if (save_directory.empty()) {
-//     fins_node->logger->warn("Save directory is empty, data saving disabled.");
-//     return;
-//   }
-//   save_data_dist = save_data.get("dist", 1.0);
-
-//   if (access(save_directory.c_str(), 0) == -1) {
-//     mkdir(save_directory.c_str(), S_IRWXU);
-//   }
-// }
-
 void initialize() {
     fins_node->logger->info("User Initialization Start");
 
@@ -707,8 +801,6 @@ void initialize() {
         [this](state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data) { h_share_model(s, ekfom_data); },
         NUM_MAX_ITERATIONS, epsi);
 
-    // init_save_data();
-
     fins_node->logger->info("User Initialization Finished");
 }
 
@@ -722,6 +814,7 @@ void loop_once() {
             return ;
         }
 
+        double t0 = omp_get_wtime();
         p_imu->Process(Measures, kf, feats_undistort);
         state_point = kf.get_x();
         pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -767,22 +860,15 @@ void loop_once() {
         normvec->resize(feats_down_size);
         feats_down_world->resize(feats_down_size);
 
-        V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
-
-        if(0) // If you need to see map point, change to "if(1)"
-        {
-            PointVector ().swap(ikdtree.PCL_Storage);
-            ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
-            featsFromMap->clear();
-            featsFromMap->points = ikdtree.PCL_Storage;
-        }
-
         pointSearchInd_surf.resize(feats_down_size);
         Nearest_Points.resize(feats_down_size);
         
         /*** iterated state estimation ***/
+        double t_update_start = omp_get_wtime();
         kf.update_iterated_dyn_share_modified(LASER_POINT_COV);
         state_point = kf.get_x();
+        double t_update_end = omp_get_wtime();
+
         euler_cur = SO3ToEuler(state_point.rot);
         pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
         geoQuat.x = state_point.rot.coeffs()[0];
@@ -790,14 +876,32 @@ void loop_once() {
         geoQuat.z = state_point.rot.coeffs()[2];
         geoQuat.w = state_point.rot.coeffs()[3];
 
+        if (use_imu_odometry_) {
+            kf_copy = kf;
+        }
+
         /******* Publish odometry *******/
-        publish_odometry_and_tf();
+        if (!use_imu_odometry_) {
+            publish_odometry();
+        }
         publish_path();
 
         /*** add the feature points to map kdtree ***/
+        double t_incre_start = omp_get_wtime();
         map_incremental();
+        double t_incre_end = omp_get_wtime();
         
         publish_frame_world();
+
+        double t_total = omp_get_wtime() - t0;
+        static int total_frame = 0;
+        static double total_time = 0;
+        total_frame++;
+        total_time += t_total;
+        if (total_frame % 10 == 0) {
+            fins_node->logger->info("FAST_LIO Statistics: [Points: {}] [Update: {:.3f}ms] [Incremental: {:.3f}ms] [Total: {:.3f}ms] [Avg Total: {:.3f}ms]", 
+                feats_down_size, (t_update_end - t_update_start) * 1000.0, (t_incre_end - t_incre_start) * 1000.0, t_total * 1000.0, (total_time / total_frame) * 1000.0);
+        }
     }
 }
 };

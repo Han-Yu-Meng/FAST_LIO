@@ -57,6 +57,8 @@ class ImuProcess
   double first_lidar_time;
   int lidar_type;
 
+  bool imu_need_init() { return imu_need_init_; }
+  V3D get_mean_acc() { return mean_acc; }
  private:
   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N);
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
