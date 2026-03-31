@@ -242,6 +242,9 @@ void lasermap_fov_segment()
     LocalMap_Points = New_LocalMap_Points;
 
     points_cache_collect();
+    if(cub_needrm.size() > 0) {
+        ikdtree.Delete_Point_Boxes(cub_needrm);
+    }
 }
 
 public:
@@ -563,11 +566,23 @@ void publish_odometry(const nav_msgs::msg::Odometry &odom)
     if (fins_node->required("odometry")) {
         fins_node->send("odometry", odom, fins::now());
     }
+
+    if (fins_node->required("transform")) {
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp = odom.header.stamp;
+        tf.header.frame_id = odom.header.frame_id;
+        tf.child_frame_id = odom.child_frame_id;
+        tf.transform.translation.x = odom.pose.pose.position.x;
+        tf.transform.translation.y = odom.pose.pose.position.y;
+        tf.transform.translation.z = odom.pose.pose.position.z;
+        tf.transform.rotation = odom.pose.pose.orientation;
+        fins_node->send("transform", tf, fins::now());
+    }
 }
 
 void publish_odometry()
 {
-    if (fins_node->required("odometry")) {
+    if (fins_node->required("odometry") || fins_node->required("transform")) {
         odomAftMapped.header.frame_id = initial_frame;
         odomAftMapped.child_frame_id = body_frame;
         odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
@@ -582,7 +597,7 @@ void publish_odometry()
         // 计算角速度
         static double last_lidar_end_time = 0;
         static SO3 last_rot = SO3::Identity();
-        SO3 delta_rot = last_rot.conjugate() * state_point.rot;
+        SO3 delta_rot =  state_point.rot * last_rot.conjugate();
         vect3 ang_vel_body;
         ang_vel_body.setZero();
         if (last_lidar_end_time > 0) {
@@ -596,7 +611,20 @@ void publish_odometry()
         odomAftMapped.twist.twist.angular.y = ang_vel_body(1);
         odomAftMapped.twist.twist.angular.z = ang_vel_body(2);
 
-        fins_node->send("odometry", odomAftMapped, fins::now());
+        if (fins_node->required("odometry")) {
+            fins_node->send("odometry", odomAftMapped, fins::now());
+        }
+
+        if (fins_node->required("transform")) {
+            geometry_msgs::msg::TransformStamped tf;
+            tf.header = odomAftMapped.header;
+            tf.child_frame_id = odomAftMapped.child_frame_id;
+            tf.transform.translation.x = odomAftMapped.pose.pose.position.x;
+            tf.transform.translation.y = odomAftMapped.pose.pose.position.y;
+            tf.transform.translation.z = odomAftMapped.pose.pose.position.z;
+            tf.transform.rotation = odomAftMapped.pose.pose.orientation;
+            fins_node->send("transform", tf, fins::now());
+        }
     }
 }
 
@@ -607,6 +635,8 @@ void publish_path()
         msg_body_pose.header.stamp = get_ros_time(lidar_end_time);
         msg_body_pose.header.frame_id = initial_frame;
 
+        path.header.stamp = msg_body_pose.header.stamp;
+        path.header.frame_id = initial_frame;
         path.poses.push_back(msg_body_pose);
         fins_node->send("path", path, fins::now());
     }
@@ -741,31 +771,40 @@ void initialize() {
 
     std::fill(epsi, epsi + 23, 0.001);
 
-    fins::ParamLoader mapping("FastLIO.mapping");
-
-    acc_cov = mapping.get("acc_cov", 0.1);
-    gyr_cov = mapping.get("gyr_cov", 0.1);
-    b_acc_cov = mapping.get("b_acc_cov", 0.0001);
-    b_gyr_cov = mapping.get("b_gyr_cov", 0.0001);
-    fov_deg = mapping.get("fov_degree", 180.0);
-
-    FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
-    HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
-
-    DET_RANGE = mapping.get("det_range", 300.0f);
-    extrinsic_est_en = mapping.get("extrinsic_est_en", false);
-    extrinT = mapping.get("extrinsic_T", std::vector<double>{0.04165, 0.02326, -0.0284});
-    extrinR = mapping.get("extrinsic_R", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1});
-
-    fins::ParamLoader common("FastLIO.common");
-    time_sync_en = common.get("time_sync_en", false);
-    time_diff_lidar_to_imu = common.get("time_offset_lidar_to_imu", 0.0);
-
     NUM_MAX_ITERATIONS = fins::param_server().get("FastLIO.max_iteration", 4);
     filter_size_surf_min = fins::param_server().get("FastLIO.filter_size_surf", 0.5);
     filter_size_map_min = fins::param_server().get("FastLIO.filter_size_map", 0.5);
     cube_len = fins::param_server().get("FastLIO.cube_side_length", 200.0);
 
+    fins::ParamLoader common("FastLIO.common");
+    initial_frame = common.get("initial_frame", "lidar_odom");
+    body_frame = common.get("body_frame", "livox_frame");
+    time_sync_en = common.get("time_sync_en", false);
+    time_diff_lidar_to_imu = common.get("time_offset_lidar_to_imu", 0.0);
+    use_imu_odometry_ = common.get("use_imu_odometry", false);
+    imu_window_size = common.get("imu_window_size", 10);
+
+    fins::ParamLoader preprocess("FastLIO.preprocess");
+    p_pre->blind = preprocess.get("blind", 0.5);
+    p_pre->lidar_type = static_cast<LID_TYPE>(preprocess.get<int>("lidar_type", AVIA));
+    lidar_type = p_pre->lidar_type;
+    p_pre->N_SCANS = preprocess.get("scan_line", 16);
+    p_pre->time_unit = static_cast<TIME_UNIT>(preprocess.get<int>("timestamp_unit", US));
+    p_pre->SCAN_RATE = preprocess.get("scan_rate", 10);
+    p_pre->feature_enabled = preprocess.get("feature_extract_enable", false);
+    p_pre->point_filter_num = preprocess.get("point_filter_num", 2);
+
+    fins::ParamLoader mapping("FastLIO.mapping");
+    acc_cov = mapping.get("acc_cov", 0.1);
+    gyr_cov = mapping.get("gyr_cov", 0.1);
+    b_acc_cov = mapping.get("b_acc_cov", 0.0001);
+    b_gyr_cov = mapping.get("b_gyr_cov", 0.0001);
+    fov_deg = mapping.get("fov_degree", 180.0);
+    DET_RANGE = mapping.get("det_range", 300.0f);
+    extrinsic_est_en = mapping.get("extrinsic_est_en", false);
+    extrinT = mapping.get("extrinsic_T", std::vector<double>{-0.011, -0.02329, 0.04412});
+    extrinR = mapping.get("extrinsic_R", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1});
+    
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
     downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
 
@@ -778,14 +817,8 @@ void initialize() {
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
 
-    fins::ParamLoader preprocess("FastLIO.preprocess");
-    p_pre->blind = preprocess.get("blind", 0.01);
-    p_pre->lidar_type = static_cast<LID_TYPE>(preprocess.get<int>("lidar_type", AVIA));
-    p_pre->N_SCANS = preprocess.get("scan_line", 16);
-    p_pre->time_unit = static_cast<TIME_UNIT>(preprocess.get<int>("timestamp_unit", US));
-    p_pre->SCAN_RATE = preprocess.get("scan_rate", 10);
-    p_pre->point_filter_num = preprocess.get("point_filter_num", 2);
-    p_pre->feature_enabled = preprocess.get("feature_extract_enable", false);
+    FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
+    HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
 
     memset(point_selected_surf, true, sizeof(point_selected_surf));
     memset(res_last, -1000.0f, sizeof(res_last));

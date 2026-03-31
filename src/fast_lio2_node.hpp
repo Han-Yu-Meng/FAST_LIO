@@ -37,6 +37,7 @@ public:
     register_output<sensor_msgs::msg::PointCloud2>("cloud");
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
+    register_output<geometry_msgs::msg::TransformStamped>("transform");
   }
 
   void initialize() override {
