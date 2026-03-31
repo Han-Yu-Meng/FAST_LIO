@@ -36,7 +36,10 @@ fins_link_ros_dependencies(${PROJECT_NAME}
     nav_msgs
     sensor_msgs
     pcl_conversions
-    livox_ros_driver2
+)
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/livox_msg/include>
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

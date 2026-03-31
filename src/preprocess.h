@@ -4,7 +4,7 @@
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <livox_ros_driver2/msg/custom_msg.hpp>
+#include "livox_ros_driver2/msg/custom_msg.hpp"
 #include <fins/node.hpp>
 #include "common_lib.h"
 

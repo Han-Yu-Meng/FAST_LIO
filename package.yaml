@@ -16,7 +16,6 @@ depends:
   sensor_msgs: "system"
 
   PCL: "system"
-  livox_ros_driver2: "system"
   pcl_conversions: "system"
 licenses:
   - "GPL-3.0-only"
