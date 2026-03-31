@@ -248,7 +248,7 @@ void lasermap_fov_segment()
 }
 
 public:
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) 
+void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, fins::AcqTime t) 
 {
     mtx_buffer.lock();
     scan_count ++;
@@ -271,7 +271,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
 
-void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg) 
+void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg, fins::AcqTime t) 
 {
     mtx_buffer.lock();
     scan_count ++;
@@ -307,7 +307,8 @@ void process_and_publish_imu_odometry(
     const sensor_msgs::msg::Imu::ConstSharedPtr& msg_in,
     double dt,
     const input_ikfom& in,
-    bool use_imu_odometry
+    bool use_imu_odometry,
+    fins::AcqTime t
 ) {
     if (!use_imu_odometry) return;
 
@@ -358,10 +359,10 @@ void process_and_publish_imu_odometry(
     imu_odometry.twist.twist.angular.z = smoothed_ang_vel(2);
 
     // 发布里程计
-    publish_odometry(imu_odometry);
+    publish_imu_odometry(imu_odometry, t);
 }
 
-void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in) 
+void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime t) 
 {
     // fins_node->logger->info("Received IMU message with timestamp {}", get_time_sec(msg_in->header.stamp));
     publish_count ++;
@@ -413,7 +414,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
     in.acc = acc;
     in.gyro = ang_vel;
 
-    process_and_publish_imu_odometry(msg_in, dt, in, use_imu_odometry_);
+    process_and_publish_imu_odometry(msg_in, dt, in, use_imu_odometry_, t);
 }
 
 double lidar_mean_scantime = 0.0;
@@ -544,7 +545,7 @@ void publish_frame_world()
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
         laserCloudmsg.header.frame_id = initial_frame;
-        fins_node->send("cloud", laserCloudmsg, fins::now());
+        fins_node->send("cloud", laserCloudmsg, fins::from_seconds(lidar_end_time));
     }
 }
 
@@ -561,10 +562,10 @@ void set_posestamp(T & out)
     
 }
 
-void publish_odometry(const nav_msgs::msg::Odometry &odom)
+void publish_imu_odometry(const nav_msgs::msg::Odometry &odom, fins::AcqTime t)
 {
     if (fins_node->required("odometry")) {
-        fins_node->send("odometry", odom, fins::now());
+        fins_node->send("odometry", odom, t);
     }
 
     if (fins_node->required("transform")) {
@@ -576,12 +577,11 @@ void publish_odometry(const nav_msgs::msg::Odometry &odom)
         tf.transform.translation.y = odom.pose.pose.position.y;
         tf.transform.translation.z = odom.pose.pose.position.z;
         tf.transform.rotation = odom.pose.pose.orientation;
-        fins_node->send("transform", tf, fins::now());
+        fins_node->send("transform", tf, t);
     }
 }
 
-void publish_odometry()
-{
+void publish_lidar_odometry() {
     if (fins_node->required("odometry") || fins_node->required("transform")) {
         odomAftMapped.header.frame_id = initial_frame;
         odomAftMapped.child_frame_id = body_frame;
@@ -612,7 +612,7 @@ void publish_odometry()
         odomAftMapped.twist.twist.angular.z = ang_vel_body(2);
 
         if (fins_node->required("odometry")) {
-            fins_node->send("odometry", odomAftMapped, fins::now());
+            fins_node->send("odometry", odomAftMapped, fins::from_seconds(lidar_end_time));
         }
 
         if (fins_node->required("transform")) {
@@ -623,7 +623,7 @@ void publish_odometry()
             tf.transform.translation.y = odomAftMapped.pose.pose.position.y;
             tf.transform.translation.z = odomAftMapped.pose.pose.position.z;
             tf.transform.rotation = odomAftMapped.pose.pose.orientation;
-            fins_node->send("transform", tf, fins::now());
+            fins_node->send("transform", tf, fins::from_seconds(lidar_end_time));
         }
     }
 }
@@ -638,7 +638,7 @@ void publish_path()
         path.header.stamp = msg_body_pose.header.stamp;
         path.header.frame_id = initial_frame;
         path.poses.push_back(msg_body_pose);
-        fins_node->send("path", path, fins::now());
+        fins_node->send("path", path, fins::from_seconds(lidar_end_time));
     }
 }
 
@@ -909,7 +909,7 @@ void loop_once() {
 
         /******* Publish odometry *******/
         if (!use_imu_odometry_) {
-            publish_odometry();
+            publish_lidar_odometry();
         }
         publish_path();
 

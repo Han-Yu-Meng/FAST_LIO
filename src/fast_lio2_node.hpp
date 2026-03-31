@@ -73,21 +73,21 @@ public:
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "Lidar Callback");
       // logger->info("Received standard lidar point cloud with {} points.", msg->width * msg->height);
-      mapper_->standard_pcl_cbk(msg.ptr());
+      mapper_->standard_pcl_cbk(msg.ptr(), msg.acq_time);
     }
   }
 
   void on_livox(const fins::Msg<livox_ros_driver2::msg::CustomMsg> &msg) {
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "Livox Callback");
-      mapper_->livox_pcl_cbk(msg.ptr());
+      mapper_->livox_pcl_cbk(msg.ptr(), msg.acq_time);
     }
   }
 
   void on_imu(const fins::Msg<sensor_msgs::msg::Imu> &msg) {
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "IMU Callback");
-      mapper_->imu_cbk(msg.ptr());
+      mapper_->imu_cbk(msg.ptr(), msg.acq_time);
     }
   }
 
