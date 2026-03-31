@@ -2,10 +2,11 @@ cmake_minimum_required(VERSION 3.16)
 
 project(FAST_LIO)
 
-find_package(PCL    REQUIRED)
-find_package(Eigen3 REQUIRED)
-find_package(OpenMP REQUIRED)
-find_package(Sophus REQUIRED)
+find_package(PCL       REQUIRED)
+find_package(Eigen3    REQUIRED)
+find_package(OpenMP    REQUIRED)
+find_package(Sophus    REQUIRED)
+find_package(livox_msg REQUIRED)
 
 add_compile_options(
     -Wno-reorder
@@ -38,15 +39,12 @@ fins_link_ros_dependencies(${PROJECT_NAME}
     pcl_conversions
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/livox_msg/include>
-)
-
 target_link_libraries(${PROJECT_NAME} PRIVATE
     OpenMP::OpenMP_CXX
     Sophus::Sophus
     ${PCL_LIBRARIES} 
     pcl_surface
+    livox_msg::livox_msg
 )
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
