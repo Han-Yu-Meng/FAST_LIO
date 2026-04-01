@@ -74,6 +74,7 @@ public:
       // FINS_TIME_BLOCK(logger, "Lidar Callback");
       // logger->info("Received standard lidar point cloud with {} points.", msg->width * msg->height);
       mapper_->standard_pcl_cbk(msg.ptr(), msg.acq_time);
+      notify_backend();
     }
   }
 
@@ -81,6 +82,7 @@ public:
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "Livox Callback");
       mapper_->livox_pcl_cbk(msg.ptr(), msg.acq_time);
+      notify_backend();
     }
   }
 
@@ -88,6 +90,7 @@ public:
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "IMU Callback");
       mapper_->imu_cbk(msg.ptr(), msg.acq_time);
+      notify_backend();
     }
   }
 
@@ -104,7 +107,11 @@ private:
     logger->info("Backend mapping worker started.");
 
     while (is_running_) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      {
+        std::unique_lock<std::mutex> lock(trigger_mtx_);
+        trigger_cv_.wait(lock, [this] { return !is_running_ || has_new_data_; });
+        has_new_data_ = false;
+      }
 
       if (!is_running_)
         break;
