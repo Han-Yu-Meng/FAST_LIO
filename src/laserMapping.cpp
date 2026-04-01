@@ -271,7 +271,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
 double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
 
-void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg, fins::AcqTime t) 
+void livox_pcl_cbk(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, fins::AcqTime t) 
 {
     mtx_buffer.lock();
     scan_count ++;

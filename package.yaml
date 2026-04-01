@@ -14,7 +14,7 @@ depends:
   geometry_msgs: "system"
   nav_msgs: "system"
   sensor_msgs: "system"
-  livox_msg: "1.0.0"
+  livox_msg: "1.0.1"
 
   PCL: "system"
   pcl_conversions: "system"
@@ -24,8 +24,8 @@ recipes:
     git: "https://github.com/Han-Yu-Meng/livox_msg.git"
     build_system: "cmake"
     versions:
-      "1.0.0":
-        tag: "v1.0.0"
+      "1.0.1":
+        tag: "v1.0.1"
 
 licenses:
   - "GPL-3.0-only"

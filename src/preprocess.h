@@ -4,7 +4,7 @@
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include "livox_ros_driver2/msg/custom_msg.hpp"
+#include "livox_driver2/msg/custom_msg.hpp"
 #include <fins/node.hpp>
 #include "common_lib.h"
 
@@ -92,7 +92,7 @@ class Preprocess
   Preprocess(fins::Node* fins_node_);
   ~Preprocess();
   
-  void process(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
+  void process(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
@@ -106,7 +106,7 @@ class Preprocess
   bool feature_enabled, given_offset_time;
 
   private:
-  void avia_handler(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg);
+  void avia_handler(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg);
   void oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void sim_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);

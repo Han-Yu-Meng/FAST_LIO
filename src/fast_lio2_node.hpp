@@ -28,7 +28,7 @@ public:
 
     register_input<sensor_msgs::msg::Imu>("imu", &FastLIO::on_imu);
 
-    register_input<livox_ros_driver2::msg::CustomMsg>("lidar",
+    register_input<livox_driver2::msg::CustomMsg>("lidar",
                                                          &FastLIO::on_livox);
 
     register_input<sensor_msgs::msg::PointCloud2>("lidar_standard",
@@ -78,7 +78,7 @@ public:
     }
   }
 
-  void on_livox(const fins::Msg<livox_ros_driver2::msg::CustomMsg> &msg) {
+  void on_livox(const fins::Msg<livox_driver2::msg::CustomMsg> &msg) {
     if (mapper_) {
       // FINS_TIME_BLOCK(logger, "Livox Callback");
       mapper_->livox_pcl_cbk(msg.ptr(), msg.acq_time);
