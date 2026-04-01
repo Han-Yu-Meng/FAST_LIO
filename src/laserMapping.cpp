@@ -827,6 +827,11 @@ void initialize() {
         get_f, df_dx, df_dw,
         [this](state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data) { h_share_model(s, ekfom_data); },
         NUM_MAX_ITERATIONS, epsi);
+    
+    kf_copy.init_dyn_share(
+        get_f, df_dx, df_dw,
+        [this](state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data) { h_share_model(s, ekfom_data); },
+        NUM_MAX_ITERATIONS, epsi);
 
     fins_node->logger->info("User Initialization Finished");
 }
