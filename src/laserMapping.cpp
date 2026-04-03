@@ -294,73 +294,8 @@ void lasermap_fov_segment()
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
-{
-    mtx_buffer.lock();
-    scan_count ++;
-    double cur_time = get_time_sec(msg->header.stamp);
-    double preprocess_start_time = omp_get_wtime();
-    if (!is_first_lidar && cur_time < last_timestamp_lidar)
-    {
-        std::cerr << "lidar loop back, clear buffer" << std::endl;
-        lidar_buffer.clear();
-    }
-    if (is_first_lidar)
-    {
-        is_first_lidar = false;
-    }
-
-    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-    p_pre->process(msg, ptr);
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(cur_time);
-    last_timestamp_lidar = cur_time;
-    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-}
-
 double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
-void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg) 
-{
-    mtx_buffer.lock();
-    double cur_time = get_time_sec(msg->header.stamp);
-    double preprocess_start_time = omp_get_wtime();
-    scan_count ++;
-    if (!is_first_lidar && cur_time < last_timestamp_lidar)
-    {
-        std::cerr << "lidar loop back, clear buffer" << std::endl;
-        lidar_buffer.clear();
-    }
-    if(is_first_lidar)
-    {
-        is_first_lidar = false;
-    }
-    last_timestamp_lidar = cur_time;
-    
-    if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty() )
-    {
-        printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n",last_timestamp_imu, last_timestamp_lidar);
-    }
-
-    if (time_sync_en && !timediff_set_flg && abs(last_timestamp_lidar - last_timestamp_imu) > 1 && !imu_buffer.empty())
-    {
-        timediff_set_flg = true;
-        timediff_lidar_wrt_imu = last_timestamp_lidar + 0.1 - last_timestamp_imu;
-        printf("Self sync IMU and LiDAR, time diff is %.10lf \n", timediff_lidar_wrt_imu);
-    }
-
-    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-    p_pre->process(msg, ptr);
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(last_timestamp_lidar);
-    
-    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-}
-
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
@@ -936,17 +871,27 @@ public:
         else
             cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
 
+        cb_group_imu_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        cb_group_lidar_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        cb_group_timer_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+        auto imu_opt = rclcpp::SubscriptionOptions();
+        imu_opt.callback_group = cb_group_imu_;
+
+        auto lidar_opt = rclcpp::SubscriptionOptions();
+        lidar_opt.callback_group = cb_group_lidar_;
+
         /*** ROS subscribe initialization ***/
         if (p_pre->lidar_type == AVIA)
         {
-            sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, 20, livox_pcl_cbk);
+            sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, 20, std::bind(&LaserMappingNode::livox_pcl_cbk, this, std::placeholders::_1), lidar_opt);
         }
         else
         {
-            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), std::bind(&LaserMappingNode::standard_pcl_cbk, this, std::placeholders::_1), lidar_opt);
         }
 
-        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, std::bind(&LaserMappingNode::imu_cbk, this, std::placeholders::_1));
+        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, std::bind(&LaserMappingNode::imu_cbk, this, std::placeholders::_1), imu_opt);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -957,7 +902,7 @@ public:
 
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
-        timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this));
+        timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this), cb_group_timer_);
 
         auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
         map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
@@ -975,6 +920,71 @@ public:
     }
 
 private:
+    void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
+    {
+        mtx_buffer.lock();
+        scan_count ++;
+        double cur_time = get_time_sec(msg->header.stamp);
+        double preprocess_start_time = omp_get_wtime();
+        if (!is_first_lidar && cur_time < last_timestamp_lidar)
+        {
+            std::cerr << "lidar loop back, clear buffer" << std::endl;
+            lidar_buffer.clear();
+        }
+        if (is_first_lidar)
+        {
+            is_first_lidar = false;
+        }
+
+        PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+        p_pre->process(msg, ptr);
+        lidar_buffer.push_back(ptr);
+        time_buffer.push_back(cur_time);
+        last_timestamp_lidar = cur_time;
+        s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+        mtx_buffer.unlock();
+        sig_buffer.notify_all();
+    }
+
+    void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg) 
+    {
+        mtx_buffer.lock();
+        double cur_time = get_time_sec(msg->header.stamp);
+        double preprocess_start_time = omp_get_wtime();
+        scan_count ++;
+        if (!is_first_lidar && cur_time < last_timestamp_lidar)
+        {
+            std::cerr << "lidar loop back, clear buffer" << std::endl;
+            lidar_buffer.clear();
+        }
+        if(is_first_lidar)
+        {
+            is_first_lidar = false;
+        }
+        last_timestamp_lidar = cur_time;
+        
+        if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty() )
+        {
+            printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n",last_timestamp_imu, last_timestamp_lidar);
+        }
+
+        if (time_sync_en && !timediff_set_flg && abs(last_timestamp_lidar - last_timestamp_imu) > 1 && !imu_buffer.empty())
+        {
+            timediff_set_flg = true;
+            timediff_lidar_wrt_imu = last_timestamp_lidar + 0.1 - last_timestamp_imu;
+            printf("Self sync IMU and LiDAR, time diff is %.10lf \n", timediff_lidar_wrt_imu);
+        }
+
+        PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+        p_pre->process(msg, ptr);
+        lidar_buffer.push_back(ptr);
+        time_buffer.push_back(last_timestamp_lidar);
+        
+        s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+        mtx_buffer.unlock();
+        sig_buffer.notify_all();
+    }
+
     void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in) {
         auto t0 = omp_get_wtime();
         publish_count ++;
@@ -1285,6 +1295,10 @@ private:
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
+    rclcpp::CallbackGroup::SharedPtr cb_group_imu_;
+    rclcpp::CallbackGroup::SharedPtr cb_group_lidar_;
+    rclcpp::CallbackGroup::SharedPtr cb_group_timer_;
+
     bool effect_pub_en = false, map_pub_en = false;
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
@@ -1307,7 +1321,12 @@ int main(int argc, char** argv)
 
     signal(SIGINT, SigHandle);
 
-    rclcpp::spin(std::make_shared<LaserMappingNode>());
+    auto node = std::make_shared<LaserMappingNode>();
+    
+    // 使用多线程执行器以解决回调阻塞问题
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
+    executor.add_node(node);
+    executor.spin();
 
     if (rclcpp::ok())
         rclcpp::shutdown();
