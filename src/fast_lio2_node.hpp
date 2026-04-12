@@ -33,11 +33,14 @@ public:
 
     register_input<sensor_msgs::msg::PointCloud2>("lidar_standard",
                                                      &FastLIO::on_lidar);
+    
+    register_input<geometry_msgs::msg::TransformStamped>("$T_{base}^{lidar}$",
+                                                         &FastLIO::on_transform);
 
     register_output<sensor_msgs::msg::PointCloud2>("cloud");
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
-    register_output<geometry_msgs::msg::TransformStamped>("transform");
+    register_output<geometry_msgs::msg::TransformStamped>("$T_{odom}^{base}$");
   }
 
   void initialize() override {
@@ -68,6 +71,12 @@ public:
   void run() override {}
   void pause() override {}
   void reset() override {}
+
+  void on_transform(const fins::Msg<geometry_msgs::msg::TransformStamped> &msg) {
+    if (mapper_) {
+      mapper_->update_transform(msg.ptr());
+    }
+  }
 
   void on_lidar(const fins::Msg<sensor_msgs::msg::PointCloud2> &msg) {
     if (mapper_) {
