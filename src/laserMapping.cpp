@@ -217,8 +217,8 @@ void lasermap_fov_segment()
     float dist_to_map_edge[3][2];
     bool need_move = false;
     for (int i = 0; i < 3; i++){
-        dist_to_map_edge[i][0] = fabs(pos_LiD(i) - LocalMap_Points.vertex_min[i]);
-        dist_to_map_edge[i][1] = fabs(pos_LiD(i) - LocalMap_Points.vertex_max[i]);
+        dist_to_map_edge[i][0] = pos_LiD(i) - LocalMap_Points.vertex_min[i];
+        dist_to_map_edge[i][1] = LocalMap_Points.vertex_max[i] - pos_LiD(i);
         if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE || dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE) need_move = true;
     }
     if (!need_move) return;
@@ -724,6 +724,10 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
     ekfom_data.h.resize(effct_feat_num);
 
+    #ifdef MP_EN
+        omp_set_num_threads(MP_PROC_NUM);
+        #pragma omp parallel for
+    #endif
     for (int i = 0; i < effct_feat_num; i++)
     {
         const PointType &laser_p  = laserCloudOri->points[i];
