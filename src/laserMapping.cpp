@@ -816,12 +816,12 @@ LaserMapping(fins::Node* node_ptr)
     p_imu = make_shared<ImuProcess>(fins_node);
 }
 
-void update_transform(const geometry_msgs::msg::TransformStamped::SharedPtr &msg)
+void update_transform(const geometry_msgs::msg::TransformStamped &msg)
 {
-    base_T_lidar = V3D(msg->transform.translation.x, msg->transform.translation.y, msg->transform.translation.z);
-    base_R_lidar = Eigen::Quaterniond(msg->transform.rotation.w, msg->transform.rotation.x, msg->transform.rotation.y, msg->transform.rotation.z).toRotationMatrix();
+    base_T_lidar = V3D(msg.transform.translation.x, msg.transform.translation.y, msg.transform.translation.z);
+    base_R_lidar = Eigen::Quaterniond(msg.transform.rotation.w, msg.transform.rotation.x, msg.transform.rotation.y, msg.transform.rotation.z).toRotationMatrix();
     static_transform_received = true;
-    fins_node->logger->info("Static transform from {} to {} updated.", msg->header.frame_id, msg->child_frame_id);
+    // fins_node->logger->info("Static transform from {} to {} updated.", msg.header.frame_id, msg.child_frame_id);
 }
 
 void initialize() {

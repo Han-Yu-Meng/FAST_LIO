@@ -72,9 +72,9 @@ public:
   void pause() override {}
   void reset() override {}
 
-  void on_transform(const fins::Msg<geometry_msgs::msg::TransformStamped> &msg) {
+  void on_transform(const geometry_msgs::msg::TransformStamped &msg) {
     if (mapper_) {
-      mapper_->update_transform(msg.ptr());
+      mapper_->update_transform(msg);
     }
   }
 
