@@ -348,6 +348,9 @@ void process_and_publish_imu_odometry(
     // 计算平滑后的角速度
     Eigen::Vector3d smoothed_ang_vel = avg_ang_vel_ / imu_ang_vel_window_.size();
 
+    // Remove bias from angular velocity for odometry output
+    smoothed_ang_vel -= imu_state.bg;
+
     // Transform imu_state.pos and imu_state.rot to base_link_frame
     // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
     M3D R_L_I = imu_state.offset_R_L_I.toRotationMatrix();
