@@ -350,8 +350,12 @@ void process_and_publish_imu_odometry(
 
     // Transform imu_state.pos and imu_state.rot to base_link_frame
     // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
-    M3D R_odom_base = base_R_lidar * imu_state.rot.toRotationMatrix() * imu_state.offset_R_L_I.toRotationMatrix() * base_R_lidar.transpose();
-    V3D t_odom_base = base_R_lidar * (imu_state.rot.toRotationMatrix() * (imu_state.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos) + base_T_lidar;
+    M3D R_L_I = imu_state.offset_R_L_I.toRotationMatrix();
+    M3D R_I_W = imu_state.rot.toRotationMatrix();
+    M3D R_base_inv = base_R_lidar.transpose();
+
+    M3D R_odom_base = base_R_lidar * R_I_W * R_L_I * R_base_inv;
+    V3D t_odom_base = base_R_lidar * (R_I_W * (R_L_I * (-R_base_inv * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos) + base_T_lidar;
     Eigen::Quaterniond q_base(R_odom_base);
 
     nav_msgs::msg::Odometry imu_odometry;
@@ -369,13 +373,14 @@ void process_and_publish_imu_odometry(
 
     vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel; // vel_imu
     // 线速度在 base_link_frame 下
-    vect3 vel_base = base_R_lidar * imu_state.offset_R_L_I.toRotationMatrix().transpose() * vel_body; 
+    M3D R_L_I_T = R_L_I.transpose();
+    vect3 vel_base = base_R_lidar * R_L_I_T * vel_body; 
     imu_odometry.twist.twist.linear.x = vel_base(0);
     imu_odometry.twist.twist.linear.y = vel_base(1);
     imu_odometry.twist.twist.linear.z = vel_base(2);
 
     // 角速度转到 base_link_frame
-    vect3 ang_vel_base = base_R_lidar * imu_state.offset_R_L_I.toRotationMatrix().transpose() * smoothed_ang_vel;
+    vect3 ang_vel_base = base_R_lidar * R_L_I_T * smoothed_ang_vel;
     imu_odometry.twist.twist.angular.x = ang_vel_base(0);
     imu_odometry.twist.twist.angular.y = ang_vel_base(1);
     imu_odometry.twist.twist.angular.z = ang_vel_base(2);
@@ -556,18 +561,26 @@ void publish_frame_world()
         int size = laserCloudFullRes->points.size();
         PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
 
+        // Pre-calculate full transform T_odom_lidar to avoid repeated matrix multiplications
+        M3D R_L_I = state_point.offset_R_L_I.toRotationMatrix();
+        M3D R_I_W = state_point.rot.toRotationMatrix();
+        M3D R_odom_lidar = base_R_lidar * R_I_W * R_L_I;
+        V3D t_odom_lidar = base_R_lidar * (R_I_W * state_point.offset_T_L_I + state_point.pos) + base_T_lidar;
+
+        #pragma omp parallel for schedule(dynamic, 512)
         for (int i = 0; i < size; i++)
         {
-            // 1. 原本：将点转换到 FAST-LIO 内部的 Lidar 世界坐标系
-            RGBpointBodyToWorld(&laserCloudFullRes->points[i], &laserCloudWorld->points[i]);
+            const auto &p_in = laserCloudFullRes->points[i];
+            auto &p_out = laserCloudWorld->points[i];
             
-            // 2. 多加一步：应用 base_link -> base_lidar 变换，将其转换到 odom (base_link 初始) 坐标系
-            V3D p_world(laserCloudWorld->points[i].x, laserCloudWorld->points[i].y, laserCloudWorld->points[i].z);
-            V3D p_odom = base_R_lidar * p_world + base_T_lidar;
-            
-            laserCloudWorld->points[i].x = p_odom(0);
-            laserCloudWorld->points[i].y = p_odom(1);
-            laserCloudWorld->points[i].z = p_odom(2);
+            p_out.x = R_odom_lidar(0,0) * p_in.x + R_odom_lidar(0,1) * p_in.y + R_odom_lidar(0,2) * p_in.z + t_odom_lidar(0);
+            p_out.y = R_odom_lidar(1,0) * p_in.x + R_odom_lidar(1,1) * p_in.y + R_odom_lidar(1,2) * p_in.z + t_odom_lidar(1);
+            p_out.z = R_odom_lidar(2,0) * p_in.x + R_odom_lidar(2,1) * p_in.y + R_odom_lidar(2,2) * p_in.z + t_odom_lidar(2);
+            p_out.intensity = p_in.intensity;
+            p_out.normal_x = p_in.normal_x;
+            p_out.normal_y = p_in.normal_y;
+            p_out.normal_z = p_in.normal_z;
+            p_out.curvature = p_in.curvature;
         }
 
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
