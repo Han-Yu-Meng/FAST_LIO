@@ -586,11 +586,13 @@ void publish_frame_world()
             p_out.curvature = p_in.curvature;
         }
 
-        sensor_msgs::msg::PointCloud2 laserCloudmsg;
-        pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
-        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = initial_frame;
-        fins_node->send("cloud", laserCloudmsg, fins::from_seconds(lidar_end_time));
+        auto laserCloudmsg_ptr = std::make_shared<sensor_msgs::msg::PointCloud2>();
+        pcl::toROSMsg(*laserCloudWorld, *laserCloudmsg_ptr);
+
+        laserCloudmsg_ptr->header.stamp = get_ros_time(lidar_end_time);
+        laserCloudmsg_ptr->header.frame_id = initial_frame;
+        
+        fins_node->send_ptr("cloud", laserCloudmsg_ptr, fins::from_seconds(lidar_end_time));
     }
 }
 
@@ -709,7 +711,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     laserCloudOri->clear(); 
     corr_normvect->clear(); 
     total_residual = 0.0; 
-
+    
     /** closest surface search and residual computation **/
     #ifdef MP_EN
         omp_set_num_threads(MP_PROC_NUM);

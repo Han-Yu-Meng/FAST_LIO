@@ -1,9 +1,9 @@
 FastLIO: 
   feature_extract_enable: false  # 是否开启特征提取。FastLIO 默认通常使用原始点云，设为 false 表示跳过提取边缘/平面特征的步骤
-  point_filter_num: 3            # 预处理时点云降采样间隔。
+  point_filter_num: 5            # 预处理时点云降采样间隔。
   max_iteration: 3               # 卡尔曼滤波（IESKF）在单次更新中的最大迭代次数
-  filter_size_surf: 0.05          # 地图面点（Surface）降采样的体素大小（单位：米）。用于控制地图的稀疏程度
-  filter_size_map: 0.05           # ikd-Tree（增量式KD树）全局地图的体素降采样大小（单位：米）
+  filter_size_surf: 0.2          # 地图面点（Surface）降采样的体素大小（单位：米）。用于控制地图的稀疏程度
+  filter_size_map: 0.2           # ikd-Tree（增量式KD树）全局地图的体素降采样大小（单位：米）
   cube_side_length: 500.0        # 局部地图构建的立方体边长（单位：米）。算法只维护这个范围内的局部地图，用于状态估计，超出范围的旧点会被移除
 
   common:
