@@ -36,7 +36,26 @@ jobs:
 
       - name: Install Basic Tools
         run: |
-          apt update
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            sed -i 's|http://archive.ubuntu.com|http://ports.ubuntu.com|g' /etc/apt/sources.list
+            sed -i 's|http://security.ubuntu.com|http://ports.ubuntu.com|g' /etc/apt/sources.list
+            # Also check for newer Ubuntu versions that use sources.txt in /etc/apt/sources.list.d/
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sed -i 's|http://archive.ubuntu.com|http://ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+              sed -i 's|http://security.ubuntu.com|http://ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+          else
+            sed -i 's|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g' /etc/apt/sources.list
+            sed -i 's|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g' /etc/apt/sources.list
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sed -i 's|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+              sed -i 's|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+          fi
+          
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
+          
+          apt update -o Acquire::ForceIPv4=true --fix-missing
           apt install -y curl git sudo jq ninja-build software-properties-common bc wget python3-yaml
 
       - name: Extract Package Name
@@ -85,10 +104,48 @@ jobs:
           source /opt/ros/${{ matrix.distro }}/setup.bash
           fins build ${{ steps.pkg_info.outputs.PACKAGE_NAME }}
           mkdir -p /github/home/artifacts
-          find /github/home/.fins/install/ -maxdepth 1 ! -path /github/home/.fins/install/ ! -name "lib" ! -name "agent" -exec cp -r {} /github/home/artifacts/ \;
+          find /github/home/.fins/install/ -maxdepth 1 ! -path /github/home/.fins/install/ ! -name "lib" ! -name "agent" ! -name "libfins_shared*" -exec cp -r {} /github/home/artifacts/ \;
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: fins-plugins-${{ matrix.os }}-${{ matrix.arch }}
+          name: ${{ steps.pkg_info.outputs.PACKAGE_NAME }}-${{ matrix.os }}-${{ matrix.arch }}
           path: /github/home/artifacts/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare Release Files
+        run: |
+          mkdir -p final-release
+          # Rename files to include platform info for release clarity
+          find release-artifacts -type f | while read file; do
+            # Get the directory name which contains the matrix info (e.g., vision-22.04-amd64)
+            DIR_NAME=$(basename $(dirname "$file"))
+            FILE_NAME=$(basename "$file")
+            cp "$file" "final-release/${DIR_NAME}-${FILE_NAME}"
+          done
+          ls -R final-release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-${{ github.sha }}
+          name: Release ${{ github.sha }}
+          body: |
+            Automated build for commit ${{ github.sha }}
+            Build results from GHA CI/CD.
+          files: final-release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
