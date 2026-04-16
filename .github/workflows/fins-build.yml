@@ -68,7 +68,7 @@ jobs:
           mkdir -p /github/home/.fins/logs
           nohup finsd > /github/home/.fins/logs/finsd_boot.log 2>&1 &
           sleep 10
-          fins workspace add ci
+          fins workspace add remote
 
       - name: Solve Dependencies
         run: |
@@ -83,10 +83,12 @@ jobs:
       - name: Build Plugins
         run: |
           source /opt/ros/${{ matrix.distro }}/setup.bash
-          fins build --all
+          fins build ${{ steps.pkg_info.outputs.PACKAGE_NAME }}
+          mkdir -p /github/home/artifacts
+          find /github/home/.fins/install/ -maxdepth 1 ! -path /github/home/.fins/install/ ! -name "lib" ! -name "agent" -exec cp -r {} /github/home/artifacts/ \;
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: fins-plugins-${{ matrix.os }}-${{ matrix.arch }}
-          path: /github/home/.fins/install/libci_${{ steps.pkg_info.outputs.PACKAGE_NAME }}.so
+          path: /github/home/artifacts/
