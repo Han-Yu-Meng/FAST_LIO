@@ -9,8 +9,6 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
-    permissions:
-      contents: write
     
     strategy:
       fail-fast: false
@@ -65,7 +63,7 @@ jobs:
           echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
           
           apt update -o Acquire::ForceIPv4=true --fix-missing
-          apt install -y curl git sudo jq ninja-build software-properties-common bc wget python3-yaml
+          apt install -y curl git sudo jq ninja-build software-properties-common bc wget python3-yaml zip
 
       - name: Extract Package Name
         id: pkg_info
@@ -113,24 +111,32 @@ jobs:
           source /opt/ros/${{ matrix.distro }}/setup.bash
           set -e
           fins build ${{ steps.pkg_info.outputs.PACKAGE_NAME }}
-          mkdir -p /github/context/artifacts
-          find /github/home/.fins/install/ -maxdepth 1 ! -path /github/home/.fins/install/ ! -name "lib" ! -name "agent" ! -name "libfins_shared*" -exec cp -r {} /github/context/artifacts/ \;
-          # 重命名文件以包含平台信息，防止 release 覆盖
-          cd /github/context/artifacts
-          for f in *; do
-            if [ -f "$f" ] || [ -d "$f" ]; then
-              mv "$f" "Ubuntu-${{ matrix.os }}-${{ matrix.arch }}-$f"
-            fi
-          done
+          mkdir -p /github/home/artifacts
+          cd /github/home/.fins/install/
+          zip -r /github/home/artifacts/Ubuntu-${{ matrix.os }}-${{ matrix.arch }}.zip . \
+            -x "lib/*" -x "agent/*" -x "libfins_shared*"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Ubuntu-${{ matrix.os }}-${{ matrix.arch }}
-          path: /github/context/artifacts/
+          path: /github/home/artifacts/*.zip
 
-      - name: Create Release for Platform
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: final-release
+          pattern: Ubuntu-*
+          merge-multiple: true
+
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ci-${{ github.sha }}
@@ -138,11 +144,10 @@ jobs:
           body: |
             Automated build for commit ${{ github.sha }}
             Build results from GHA CI/CD.
-          files: /github/context/artifacts/*
+          files: final-release/*
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 
           
