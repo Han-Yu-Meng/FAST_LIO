@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+    permissions:
+      contents: write
     
     strategy:
       fail-fast: false
@@ -111,39 +113,24 @@ jobs:
           source /opt/ros/${{ matrix.distro }}/setup.bash
           set -e
           fins build ${{ steps.pkg_info.outputs.PACKAGE_NAME }}
-          mkdir -p /github/home/artifacts
-          find /github/home/.fins/install/ -maxdepth 1 ! -path /github/home/.fins/install/ ! -name "lib" ! -name "agent" ! -name "libfins_shared*" -exec cp -r {} /github/home/artifacts/ \;
+          mkdir -p /github/context/artifacts
+          find /github/home/.fins/install/ -maxdepth 1 ! -path /github/home/.fins/install/ ! -name "lib" ! -name "agent" ! -name "libfins_shared*" -exec cp -r {} /github/context/artifacts/ \;
+          # 重命名文件以包含平台信息，防止 release 覆盖
+          cd /github/context/artifacts
+          for f in *; do
+            if [ -f "$f" ] || [ -d "$f" ]; then
+              mv "$f" "Ubuntu-${{ matrix.os }}-${{ matrix.arch }}-$f"
+            fi
+          done
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Ubuntu-${{ matrix.os }}-${{ matrix.arch }}
-          path: /github/home/artifacts/
+          path: /github/context/artifacts/
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    permissions:
-      contents: write
-    steps:
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-artifacts
-
-      - name: Prepare Release Files
-        run: |
-          mkdir -p final-release
-          # Rename files to include platform info for release clarity
-          find release-artifacts -type f | while read file; do
-            DIR_NAME=$(basename $(dirname "$file"))
-            FILE_NAME=$(basename "$file")
-            cp "$file" "final-release/${DIR_NAME}-${FILE_NAME}"
-          done
-          ls -R final-release
-
-      - name: Create Release
+      - name: Create Release for Platform
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ci-${{ github.sha }}
@@ -151,10 +138,11 @@ jobs:
           body: |
             Automated build for commit ${{ github.sha }}
             Build results from GHA CI/CD.
-          files: final-release/*
+          files: /github/context/artifacts/*
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 
           
