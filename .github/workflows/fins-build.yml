@@ -94,7 +94,7 @@ jobs:
           mkdir -p /github/home/.fins/logs
           nohup finsd > /github/home/.fins/logs/finsd_boot.log 2>&1 &
           sleep 3
-          fins workspace add remote
+          fins workspace add Github@${{ github.repository_owner }}@${{ github.event.repository.name }}
 
       - name: Solve Dependencies
         run: |
@@ -117,7 +117,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.pkg_info.outputs.PACKAGE_NAME }}-${{ matrix.os }}-${{ matrix.arch }}
+          name: Ubuntu-${{ matrix.os }}-${{ matrix.arch }}
           path: /github/home/artifacts/
 
   release:
@@ -137,7 +137,6 @@ jobs:
           mkdir -p final-release
           # Rename files to include platform info for release clarity
           find release-artifacts -type f | while read file; do
-            # Get the directory name which contains the matrix info (e.g., vision-22.04-amd64)
             DIR_NAME=$(basename $(dirname "$file"))
             FILE_NAME=$(basename "$file")
             cp "$file" "final-release/${DIR_NAME}-${FILE_NAME}"
