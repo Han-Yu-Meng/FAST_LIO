@@ -85,7 +85,7 @@ jobs:
 
       - name: Install Fins-CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/Han-Yu-Meng/fins-cli/main/install.sh | sudo bash || true
+          curl -fsSL https://raw.githubusercontent.com/Han-Yu-Meng/fins-cli/main/install.sh | sudo -E bash || true
           mkdir -p /github/home/.fins
           cp -r /root/.fins/* /github/home/.fins/ || true
 
