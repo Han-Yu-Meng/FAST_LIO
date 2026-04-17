@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+    timeout-minutes: 15
     
     strategy:
       fail-fast: false
@@ -34,11 +35,25 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Fix Permissions for Cache
+        run: |
+          sudo chown -R $(id -u):$(id -g) .
+
       - name: Check for package.yaml
         run: |
           if [ ! -f "package.yaml" ]; then
             echo "Error: package.yaml not found. This repository might not be a valid FINS plugin. Exiting..."
             exit 1
+          fi
+
+      - name: Run Cppcheck
+        run: |
+          cppcheck --enable=all --inline-suppr --std=c++17 --output-file=cppcheck_report.txt src/
+          if [ -s cppcheck_report.txt ]; then
+            echo "Cppcheck found issues:"
+            cat cppcheck_report.txt
+          else
+            echo "No Cppcheck issues found."
           fi
 
       - name: Install Basic Tools
@@ -60,16 +75,29 @@ jobs:
             fi
           fi
           
-          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
+          rm -f /etc/apt/apt.conf.d/docker-clean || true
+          echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/01keep-debs
+          
+          echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+          echo 'Acquire::http::Timeout "10";' >> /etc/apt/apt.conf.d/80-retries
+          echo 'Acquire::ForceIPv4 "true";' >> /etc/apt/apt.conf.d/80-retries
           
           apt update -o Acquire::ForceIPv4=true --fix-missing
-          apt install -y curl git sudo jq ninja-build software-properties-common bc wget python3-yaml zip
+          apt install -y --no-install-recommends curl git sudo jq ninja-build software-properties-common bc wget python3-yaml zip cppcheck
 
       - name: Extract Package Name
         id: pkg_info
         run: |
           PKG_NAME=$(python3 -c "import yaml; print(yaml.safe_load(open('package.yaml'))['name'])")
           echo "PACKAGE_NAME=$PKG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Cache APT Archives
+        uses: actions/cache@v4
+        with:
+          path: apt-cache
+          key: apt-cache-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('package.yaml') }}
+          restore-keys: |
+            apt-cache-${{ matrix.os }}-${{ matrix.arch }}-
 
       - name: Cache Fins-SDK
         id: cache-fins-sdk
@@ -78,6 +106,14 @@ jobs:
           path: /github/home/FineVision
           key: fins-sdk-v2-${{ matrix.os }}-${{ matrix.arch }}
 
+      - name: Cache Fins Dependencies
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.fins/dependencies
+          key: fins-deps-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('package.yaml') }}
+          restore-keys: |
+            fins-deps-${{ matrix.os }}-${{ matrix.arch }}-
+
       - name: Install Fins-SDK
         if: steps.cache-fins-sdk.outputs.cache-hit != 'true'
         run: |
@@ -85,7 +121,9 @@ jobs:
 
       - name: Install Fins-CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/Han-Yu-Meng/fins-cli/main/install.sh | sudo bash || true
+          for i in {1..5}; do
+            curl -fsSL --connect-timeout 5 --retry 3 https://raw.githubusercontent.com/Han-Yu-Meng/fins-cli/main/install.sh | sudo bash && break || sleep 5
+          done
           mkdir -p /github/home/.fins
           cp -r /root/.fins/* /github/home/.fins/ || true
 
@@ -99,6 +137,11 @@ jobs:
       - name: Solve Dependencies
         run: |
           source /opt/ros/${{ matrix.distro }}/setup.bash
+          
+          mkdir -p apt-cache
+          sudo rm -rf /var/cache/apt/archives
+          sudo ln -s $(pwd)/apt-cache /var/cache/apt/archives
+          
           sudo fins dep solve ${{ steps.pkg_info.outputs.PACKAGE_NAME }}
           
           pkill finsd || true
@@ -125,18 +168,34 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      (needs.build.result == 'success' || needs.build.result == 'failure' || needs.build.result == 'cancelled')
     permissions:
       contents: write
     steps:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           path: final-release
           pattern: Ubuntu-*
           merge-multiple: true
 
+      - name: Check if any artifacts were downloaded
+        id: check_artifacts
+        run: |
+          if [ -d "final-release" ] && [ "$(ls -A final-release)" ]; then
+            echo "Artifacts found!"
+            echo "has_files=true" >> $GITHUB_OUTPUT
+          else
+            echo "No artifacts found. Skipping release creation."
+            echo "has_files=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create Release
+        if: steps.check_artifacts.outputs.has_files == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ci-${{ github.sha }}
@@ -149,5 +208,4 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
           
