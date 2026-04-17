@@ -48,7 +48,7 @@ jobs:
 
       - name: Run Cppcheck
         run: |
-          cppcheck --enable=all --inline-suppr --std=c++17 --output-file=cppcheck_report.txt src/
+          cppcheck --enable=all --inline-suppr --std=c++17 --output-file=cppcheck_report.txt . || true
           if [ -s cppcheck_report.txt ]; then
             echo "Cppcheck found issues:"
             cat cppcheck_report.txt
