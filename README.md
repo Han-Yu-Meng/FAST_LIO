@@ -1,3 +1,5 @@
+Default config: [config/mid360.yaml](config/mid360.yaml)
+
 ## Related Works and Extended Application
 
 **SLAM:**

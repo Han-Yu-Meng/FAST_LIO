@@ -1,18 +1,17 @@
 FastLIO: 
-  feature_extract_enable: false  # 是否开启特征提取。FastLIO 默认通常使用原始点云，设为 false 表示跳过提取边缘/平面特征的步骤
-  point_filter_num: 5            # 预处理时点云降采样间隔。
   max_iteration: 3               # 卡尔曼滤波（IESKF）在单次更新中的最大迭代次数
-  filter_size_surf: 0.2          # 地图面点（Surface）降采样的体素大小（单位：米）。用于控制地图的稀疏程度
-  filter_size_map: 0.2           # ikd-Tree（增量式KD树）全局地图的体素降采样大小（单位：米）
+  filter_size_surf: 0.4          # 地图面点（Surface）降采样的体素大小（单位：米）。用于控制地图的稀疏程度
+  filter_size_map: 0.4           # ikd-Tree（增量式KD树）全局地图的体素降采样大小（单位：米）
   cube_side_length: 500.0        # 局部地图构建的立方体边长（单位：米）。算法只维护这个范围内的局部地图，用于状态估计，超出范围的旧点会被移除
 
   common:
-    initial_frame: "lidar_odom"             # 初始化的时候位于的坐标系
-    body_frame: "base_lidar"                # 雷达位于的坐标系
+    initial_frame: "odom"             # 初始化的时候位于的坐标系
+    base_lidar_frame: "base_lidar"                # 雷达位于的坐标系
+    base_link_frame:  "base_link"                 # 雷达位于的坐标系
     time_sync_en: false                     # 是否开启软件时间同步。如果硬件（LiDAR和IMU）已经通过 PTP 或 PPS 同步，这里设为 false
     time_offset_lidar_to_imu: 0.0
     use_imu_odometry: true                  # true = 输出imu里程计，false = 输出lidar里程计
-    imu_window_size: 200                    # imu 滑动窗口大小
+    imu_window_size: 5                    # imu 滑动窗口大小
 
 
   preprocess:
@@ -21,8 +20,8 @@ FastLIO:
     scan_line: 4
     timestamp_unit: 3 # SEC = 0, MS = 1, US = 2, NS = 3
     scan_rate: 10
-    point_filter_num: 1
-    feature_extract_enable: false
+    feature_extract_enable: false  # 是否开启特征提取。FastLIO 默认通常使用原始点云，设为 false 表示跳过提取边缘/平面特征的步骤
+    point_filter_num: 3            # 预处理时点云降采样间隔。
     
   mapping:
     acc_cov: 0.1         # IMU 加速度计的测量噪声协方差（反映传感器的精度，值越小越信任传感器数据）
