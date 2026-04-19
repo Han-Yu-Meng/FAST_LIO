@@ -57,22 +57,22 @@ public:
     logger->info("FastLIO Node initialized with independent mapping thread.");
   }
 
-  void deinitialize() {
+  void pause() override {
     is_running_ = false;
     trigger_cv_.notify_all();
 
     if (mapping_thread_.joinable()) {
       mapping_thread_.join();
     }
-
-    mapper_.reset();
   }
 
-  ~FastLIO() { deinitialize(); }
+  void run() override {
 
-  void run() override {}
-  void pause() override {}
-  void reset() override {}
+  }
+  void reset() override {
+    pause();
+    mapper_.reset();
+  }
 
   void on_transform(const geometry_msgs::msg::TransformStamped &msg) {
     if (mapper_) {

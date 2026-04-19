@@ -6,4 +6,4 @@
 
 #include "fast_lio2_node.hpp"
 
-DEFINE_PLUGIN_ENTRY()
+DEFINE_PLUGIN_ENTRY(fins::STATEFUL)
