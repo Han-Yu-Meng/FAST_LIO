@@ -12,6 +12,7 @@ FastLIO:
     time_offset_lidar_to_imu: 0.0
     use_imu_odometry: true                  # true = 输出imu里程计，false = 输出lidar里程计
     imu_window_size: 5                    # imu 滑动窗口大小
+    imu_time_tolerance: 0.01               # IMU时间容忍度（单位：秒），用于同步IMU和LiDAR数据
 
 
   preprocess:

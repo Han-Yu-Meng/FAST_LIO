@@ -9,6 +9,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <fins/node.hpp>
 
 using namespace std;
 using namespace Eigen;
@@ -61,6 +62,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     double lidar_end_time;
     PointCloudXYZI::Ptr lidar;
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
+    fins::AcqTime acq_time;
 };
 
 struct StatesGroup

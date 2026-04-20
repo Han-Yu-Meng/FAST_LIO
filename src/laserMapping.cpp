@@ -83,6 +83,7 @@ double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+double imu_time_tolerance = 0.01;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -103,6 +104,7 @@ vector<double>       extrinR{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+deque<fins::AcqTime>              acq_time_buffer;
 
 double epsi[23];
 
@@ -270,12 +272,14 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
     {
         fins_node->logger->error("lidar loop back, clear buffer");
         lidar_buffer.clear();
+        acq_time_buffer.clear();
     }
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(get_time_sec(msg->header.stamp));
+    acq_time_buffer.push_back(t);
     last_timestamp_lidar = get_time_sec(msg->header.stamp);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -292,6 +296,7 @@ void livox_pcl_cbk(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, fin
     {
         fins_node->logger->error("lidar loop back, clear buffer");
         lidar_buffer.clear();
+        acq_time_buffer.clear();
     }
     last_timestamp_lidar = get_time_sec(msg->header.stamp);
     
@@ -311,6 +316,7 @@ void livox_pcl_cbk(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, fin
     p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
+    acq_time_buffer.push_back(t);
     
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -460,6 +466,7 @@ bool sync_packages(MeasureGroup &meas)
     {
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
+        meas.acq_time = acq_time_buffer.front();
 
 
         if (meas.lidar->points.size() <= 1) // time too little
@@ -485,7 +492,7 @@ bool sync_packages(MeasureGroup &meas)
         lidar_pushed = true;
     }
 
-    if (last_timestamp_imu < lidar_end_time)
+    if (last_timestamp_imu < lidar_end_time - imu_time_tolerance) // IMU Time Tolerance from config
     {
         return false;
     }
@@ -503,6 +510,7 @@ bool sync_packages(MeasureGroup &meas)
 
     lidar_buffer.pop_front();
     time_buffer.pop_front();
+    acq_time_buffer.pop_front();
     lidar_pushed = false;
     return true;
 }
@@ -556,7 +564,7 @@ void map_incremental()
 PointCloudXYZI::Ptr pcl_wait_pub{new PointCloudXYZI(500000, 1)};
 PointCloudXYZI::Ptr pcl_wait_save{new PointCloudXYZI()};
 
-void publish_frame_world()
+void publish_frame_world(const fins::AcqTime &acq_time)
 {
     if(fins_node->required("cloud"))
     {
@@ -592,7 +600,7 @@ void publish_frame_world()
         laserCloudmsg_ptr->header.stamp = get_ros_time(lidar_end_time);
         laserCloudmsg_ptr->header.frame_id = initial_frame;
         
-        fins_node->send_ptr("cloud", laserCloudmsg_ptr, fins::from_seconds(lidar_end_time));
+        fins_node->send_ptr("cloud", laserCloudmsg_ptr, acq_time);
     }
 }
 
@@ -628,7 +636,7 @@ void publish_imu_odometry(const nav_msgs::msg::Odometry &odom, fins::AcqTime t)
     }
 }
 
-void publish_lidar_odometry() {
+void publish_lidar_odometry(const fins::AcqTime &acq_time) {
     if (fins_node->required("odometry") || fins_node->required("$T_{odom}^{base}$")) {
         odomAftMapped.header.frame_id = initial_frame;
         odomAftMapped.child_frame_id = base_link_frame;
@@ -676,7 +684,7 @@ void publish_lidar_odometry() {
         odomAftMapped.twist.twist.angular.z = ang_vel_base(2);
 
         if (fins_node->required("odometry")) {
-            fins_node->send("odometry", odomAftMapped, fins::from_seconds(lidar_end_time));
+            fins_node->send("odometry", odomAftMapped, acq_time);
         }
 
         if (fins_node->required("$T_{odom}^{base}$")) {
@@ -687,12 +695,12 @@ void publish_lidar_odometry() {
             tf.transform.translation.y = odomAftMapped.pose.pose.position.y;
             tf.transform.translation.z = odomAftMapped.pose.pose.position.z;
             tf.transform.rotation = odomAftMapped.pose.pose.orientation;
-            fins_node->send("$T_{odom}^{base}$", tf, fins::from_seconds(lidar_end_time));
+            fins_node->send("$T_{odom}^{base}$", tf, acq_time);
         }
     }
 }
 
-void publish_path()
+void publish_path(const fins::AcqTime &acq_time)
 {
     if (fins_node->required("path")) {
         set_posestamp(msg_body_pose);
@@ -702,7 +710,7 @@ void publish_path()
         path.header.stamp = msg_body_pose.header.stamp;
         path.header.frame_id = initial_frame;
         path.poses.push_back(msg_body_pose);
-        fins_node->send("path", path, fins::from_seconds(lidar_end_time));
+        fins_node->send("path", path, acq_time);
     }
 }
 
@@ -860,6 +868,7 @@ void initialize() {
     time_diff_lidar_to_imu = common.get("time_offset_lidar_to_imu", 0.0);
     use_imu_odometry_ = common.get("use_imu_odometry", false);
     imu_window_size = common.get("imu_window_size", 10);
+    imu_time_tolerance = common.get("imu_time_tolerance", 0.01);
 
     fins::ParamLoader preprocess("FastLIO.preprocess");
     p_pre->blind = preprocess.get("blind", 0.5);
@@ -991,16 +1000,16 @@ void loop_once() {
 
         /******* Publish odometry *******/
         if (!use_imu_odometry_) {
-            publish_lidar_odometry();
+            publish_lidar_odometry(Measures.acq_time);
         }
-        publish_path();
+        publish_path(Measures.acq_time);
 
         /*** add the feature points to map kdtree ***/
         double t_incre_start = omp_get_wtime();
         map_incremental();
         double t_incre_end = omp_get_wtime();
         
-        publish_frame_world();
+        publish_frame_world(Measures.acq_time);
 
         double t_total = omp_get_wtime() - t0;
         static int total_frame = 0;
