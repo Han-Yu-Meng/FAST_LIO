@@ -8,7 +8,6 @@ maintainers:
     email: "fins@sjtu.edu.cn"
 depends:
   Eigen3: "3.4.0"
-  Sophus: "1.22.4"
   OpenMP: "system"
   
   geometry_msgs: "system"

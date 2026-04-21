@@ -5,7 +5,6 @@ project(FAST_LIO)
 find_package(PCL       REQUIRED)
 find_package(Eigen3    REQUIRED)
 find_package(OpenMP    REQUIRED)
-find_package(Sophus    REQUIRED)
 find_package(livox_msg REQUIRED)
 
 add_compile_options(
@@ -41,7 +40,6 @@ fins_link_ros_dependencies(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     OpenMP::OpenMP_CXX
-    Sophus::Sophus
     ${PCL_LIBRARIES} 
     pcl_surface
     livox_msg::livox_msg
