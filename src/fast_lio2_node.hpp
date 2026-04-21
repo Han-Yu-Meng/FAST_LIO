@@ -58,6 +58,7 @@ public:
   }
 
   void pause() override {
+    logger->info("FastLIO Node is paused...");
     is_running_ = false;
     trigger_cv_.notify_all();
 
