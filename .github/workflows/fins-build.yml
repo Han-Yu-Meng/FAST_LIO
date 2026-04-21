@@ -99,12 +99,18 @@ jobs:
           restore-keys: |
             apt-cache-${{ matrix.os }}-${{ matrix.arch }}-
 
+      - name: Get SDK Latest Commit
+        id: sdk-commit
+        run: |
+          SDK_COMMIT=$(git ls-remote https://gitee.com/fins-robotics/FineVision refs/heads/V2\(dev\) | cut -f1)
+          echo "sdk_commit=$SDK_COMMIT" >> $GITHUB_OUTPUT
+
       - name: Cache Fins-SDK
         id: cache-fins-sdk
         uses: actions/cache@v4
         with:
           path: /github/home/FineVision
-          key: fins-sdk-v2-${{ matrix.os }}-${{ matrix.arch }}
+          key: fins-sdk-v2-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.sdk-commit.outputs.sdk_commit }}
 
       - name: Cache Fins Dependencies
         uses: actions/cache@v4
