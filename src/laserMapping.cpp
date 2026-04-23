@@ -931,71 +931,82 @@ void loop_once() {
             flg_first_scan = false;
             return ;
         }
-
-        double t0 = omp_get_wtime();
-        p_imu->Process(Measures, kf, feats_undistort);
-        state_point = kf.get_x();
-        pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
-
-        if (feats_undistort->empty() || (feats_undistort == NULL))
-        {
-            fins_node->logger->warn("No point, skip this scan!\n");
-            return ;
-        }
-
-        flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
-                        false : true;
-        /*** Segment the map in lidar FOV ***/
-        lasermap_fov_segment();
-
-        /*** downsample the feature points in a scan ***/
-        downSizeFilterSurf.setInputCloud(feats_undistort);
-        downSizeFilterSurf.filter(*feats_down_body);
-        feats_down_size = feats_down_body->points.size();
-        /*** initialize the map kdtree ***/
-        if(ikdtree.Root_Node == nullptr)
-        {
-            if(feats_down_size > 5)
-            {
-                ikdtree.set_downsample_param(filter_size_map_min);
-                feats_down_world->resize(feats_down_size);
-                for(int i = 0; i < feats_down_size; i++)
-                {
-                    pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
-                }
-                ikdtree.Build(feats_down_world->points);
-            }
-            return ;
-        }
-
-        /*** ICP and iterated Kalman filter update ***/
-        if (feats_down_size < 5)
-        {
-            fins_node->logger->warn("No point, skip this scan!\n");
-            return ;
-        }
         
-        normvec->resize(feats_down_size);
-        feats_down_world->resize(feats_down_size);
+        double t0;
+        {
+            auto t = fins_node->recorder("preprocessing", Measures.acq_time);
+            t0 = omp_get_wtime();
+            p_imu->Process(Measures, kf, feats_undistort);
+            state_point = kf.get_x();
+            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
-        pointSearchInd_surf.resize(feats_down_size);
-        Nearest_Points.resize(feats_down_size);
+            if (feats_undistort->empty() || (feats_undistort == NULL))
+            {
+                fins_node->logger->warn("No point, skip this scan!\n");
+                return ;
+            }
+        }
+
+        {
+            auto t = fins_node->recorder("spatial_search", Measures.acq_time);
+            flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
+                            false : true;
+            /*** Segment the map in lidar FOV ***/
+            lasermap_fov_segment();
+
+            /*** downsample the feature points in a scan ***/
+            downSizeFilterSurf.setInputCloud(feats_undistort);
+            downSizeFilterSurf.filter(*feats_down_body);
+            feats_down_size = feats_down_body->points.size();
+            /*** initialize the map kdtree ***/
+            if(ikdtree.Root_Node == nullptr)
+            {
+                if(feats_down_size > 5)
+                {
+                    ikdtree.set_downsample_param(filter_size_map_min);
+                    feats_down_world->resize(feats_down_size);
+                    for(int i = 0; i < feats_down_size; i++)
+                    {
+                        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+                    }
+                    ikdtree.Build(feats_down_world->points);
+                }
+                return ;
+            }
+
+            /*** ICP and iterated Kalman filter update ***/
+            if (feats_down_size < 5)
+            {
+                fins_node->logger->warn("No point, skip this scan!\n");
+                return ;
+            }
+            
+            normvec->resize(feats_down_size);
+            feats_down_world->resize(feats_down_size);
+
+            pointSearchInd_surf.resize(feats_down_size);
+            Nearest_Points.resize(feats_down_size);
+        }
         
         /*** iterated state estimation ***/
-        double t_update_start = omp_get_wtime();
-        kf.update_iterated_dyn_share_modified(LASER_POINT_COV);
-        state_point = kf.get_x();
-        double t_update_end = omp_get_wtime();
+        double t_update_start, t_update_end;
+        {
+            auto t = fins_node->recorder("state_estimation", Measures.acq_time);
+            t_update_start = omp_get_wtime();
+            kf.update_iterated_dyn_share_modified(LASER_POINT_COV);
+            state_point = kf.get_x();
+            t_update_end = omp_get_wtime();
 
-        euler_cur = SO3ToEuler(state_point.rot);
-        pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
-        geoQuat.x = state_point.rot.coeffs()[0];
-        geoQuat.y = state_point.rot.coeffs()[1];
-        geoQuat.z = state_point.rot.coeffs()[2];
-        geoQuat.w = state_point.rot.coeffs()[3];
+            euler_cur = SO3ToEuler(state_point.rot);
+            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+            geoQuat.x = state_point.rot.coeffs()[0];
+            geoQuat.y = state_point.rot.coeffs()[1];
+            geoQuat.z = state_point.rot.coeffs()[2];
+            geoQuat.w = state_point.rot.coeffs()[3];
 
-        if (use_imu_odometry_) {
-            kf_copy = kf;
+            if (use_imu_odometry_) {
+                kf_copy = kf;
+            }
         }
 
         /******* Publish odometry *******/
@@ -1005,9 +1016,13 @@ void loop_once() {
         publish_path(Measures.acq_time);
 
         /*** add the feature points to map kdtree ***/
-        double t_incre_start = omp_get_wtime();
-        map_incremental();
-        double t_incre_end = omp_get_wtime();
+        double t_incre_start, t_incre_end;
+        {
+            auto t = fins_node->recorder("map_incremental", Measures.acq_time);
+            t_incre_start = omp_get_wtime();
+            map_incremental();
+            t_incre_end = omp_get_wtime();
+        }
         
         publish_frame_world(Measures.acq_time);
 
