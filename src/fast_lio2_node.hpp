@@ -39,7 +39,7 @@ public:
     register_input<geometry_msgs::msg::TransformStamped>("$T_{base}^{lidar}$",
                                                          &FastLIO::on_transform);
 
-    register_output<sensor_msgs::msg::PointCloud2>("cloud");
+    register_output<pcl::PointCloud<pcl::PointXYZI>::Ptr>("cloud");
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
     register_output<geometry_msgs::msg::TransformStamped>("$T_{odom}^{base}$");

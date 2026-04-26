@@ -565,14 +565,15 @@ PointCloudXYZI::Ptr pcl_wait_pub{new PointCloudXYZI(500000, 1)};
 PointCloudXYZI::Ptr pcl_wait_save{new PointCloudXYZI()};
 
 void publish_frame_world(const fins::AcqTime &acq_time)
-{
+{   
+    auto t = fins_node->recorder("frame", acq_time);
     if(fins_node->required("cloud"))
     {
         PointCloudXYZI::Ptr laserCloudFullRes(feats_undistort);
         int size = laserCloudFullRes->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
+        
+        pcl::PointCloud<pcl::PointXYZI>::Ptr laserCloudWorld(new pcl::PointCloud<pcl::PointXYZI>(size, 1));
 
-        // Pre-calculate full transform T_odom_lidar to avoid repeated matrix multiplications
         M3D R_L_I = state_point.offset_R_L_I.toRotationMatrix();
         M3D R_I_W = state_point.rot.toRotationMatrix();
         M3D R_odom_lidar = base_R_lidar * R_I_W * R_L_I;
@@ -588,19 +589,11 @@ void publish_frame_world(const fins::AcqTime &acq_time)
             p_out.y = R_odom_lidar(1,0) * p_in.x + R_odom_lidar(1,1) * p_in.y + R_odom_lidar(1,2) * p_in.z + t_odom_lidar(1);
             p_out.z = R_odom_lidar(2,0) * p_in.x + R_odom_lidar(2,1) * p_in.y + R_odom_lidar(2,2) * p_in.z + t_odom_lidar(2);
             p_out.intensity = p_in.intensity;
-            p_out.normal_x = p_in.normal_x;
-            p_out.normal_y = p_in.normal_y;
-            p_out.normal_z = p_in.normal_z;
-            p_out.curvature = p_in.curvature;
         }
-
-        auto laserCloudmsg_ptr = std::make_shared<sensor_msgs::msg::PointCloud2>();
-        pcl::toROSMsg(*laserCloudWorld, *laserCloudmsg_ptr);
-
-        laserCloudmsg_ptr->header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg_ptr->header.frame_id = initial_frame;
         
-        fins_node->send_ptr("cloud", laserCloudmsg_ptr, acq_time);
+        laserCloudWorld->header.frame_id = initial_frame;
+        
+        fins_node->send("cloud", laserCloudWorld, acq_time);
     }
 }
 
