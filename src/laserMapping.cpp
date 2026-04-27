@@ -579,7 +579,7 @@ void publish_frame_world(const fins::AcqTime &acq_time)
         M3D R_odom_lidar = base_R_lidar * R_I_W * R_L_I;
         V3D t_odom_lidar = base_R_lidar * (R_I_W * state_point.offset_T_L_I + state_point.pos) + base_T_lidar;
 
-        #pragma omp parallel for schedule(dynamic, 512)
+        // #pragma omp parallel for schedule(dynamic, 512)
         for (int i = 0; i < size; i++)
         {
             const auto &p_in = laserCloudFullRes->points[i];
