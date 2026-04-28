@@ -112,9 +112,9 @@ PointCloudXYZI::Ptr featsFromMap{new PointCloudXYZI()};
 PointCloudXYZI::Ptr feats_undistort{new PointCloudXYZI()};
 PointCloudXYZI::Ptr feats_down_body{new PointCloudXYZI()};
 PointCloudXYZI::Ptr feats_down_world{new PointCloudXYZI()};
-PointCloudXYZI::Ptr normvec{new PointCloudXYZI(100000, 1)};
-PointCloudXYZI::Ptr laserCloudOri{new PointCloudXYZI(100000, 1)};
-PointCloudXYZI::Ptr corr_normvect{new PointCloudXYZI(100000, 1)};
+PointCloudXYZI::Ptr normvec{new PointCloudXYZI(30000, 1)};
+PointCloudXYZI::Ptr laserCloudOri{new PointCloudXYZI(30000, 1)};
+PointCloudXYZI::Ptr corr_normvect{new PointCloudXYZI(30000, 1)};
 
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
@@ -561,9 +561,6 @@ void map_incremental()
     ikdtree.Add_Points(PointNoNeedDownsample, false); 
 }
 
-PointCloudXYZI::Ptr pcl_wait_pub{new PointCloudXYZI(500000, 1)};
-PointCloudXYZI::Ptr pcl_wait_save{new PointCloudXYZI()};
-
 void publish_frame_world(const fins::AcqTime &acq_time)
 {   
     auto t = fins_node->recorder("frame", acq_time);
@@ -731,7 +728,10 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         point_world.z = p_global(2);
         point_world.intensity = point_body.intensity;
 
-        vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
+        static thread_local vector<float> pointSearchSqDis;
+        if (pointSearchSqDis.size() != NUM_MATCH_POINTS) {
+            pointSearchSqDis.resize(NUM_MATCH_POINTS);
+        }
 
         auto &points_near = Nearest_Points[i];
 
