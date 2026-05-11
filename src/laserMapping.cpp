@@ -586,22 +586,36 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.pose.pose.orientation.z = q_base.z();
     odomAftMapped.pose.pose.orientation.w = q_base.w();
 
-    // 计算线速度 (IMU frame in local body)
-    vect3 vel_body = state_point.rot.conjugate() * state_point.vel;
-    // 线速度在 base_link_frame 下
-    vect3 vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * vel_body; 
+    // 计算线速度
+    // state_point.vel 是 IMU 原点在世界系下的速度，先转到 IMU 体系
+    vect3 vel_imu_in_IMU = state_point.rot.conjugate() * state_point.vel;
+
+    // 计算角速度：使用相邻两帧 lidar 时间戳计算 dt，从而得到真实角速度 (rad/s)
+    static SO3 last_rot = SO3::Identity();
+    static double last_lidar_time = lidar_end_time;
+    double dt_ang = lidar_end_time - last_lidar_time;
+    SO3 delta_rot = state_point.rot * last_rot.conjugate();
+    last_rot = state_point.rot;
+    last_lidar_time = lidar_end_time;
+    // SO3::log(R_new * R_old^T) / dt 得到世界系角速度，再转到 IMU 体系
+    vect3 ang_vel_world = (dt_ang > 1e-6) ? vect3(SO3::log(delta_rot) / dt_ang) : vect3::Zero();
+    vect3 omega_IMU = state_point.rot.toRotationMatrix().transpose() * ang_vel_world;
+
+    // 刚体速度修正：v_base = v_imu + omega_IMU × (p_base - p_imu)，均在 IMU 体系下
+    // p_base 在 IMU 体系中的位置：先从 base 转到 lidar，再从 lidar 转到 IMU
+    V3D t_base_in_IMU = state_point.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar)
+                        + state_point.offset_T_L_I;
+    vect3 vel_base_in_IMU = vel_imu_in_IMU + omega_IMU.cross(t_base_in_IMU);
+
+    // 再从 IMU 体系旋转到 base_link 体系：R_base_IMU = base_R_lidar * R_LI^T
+    vect3 vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * vel_base_in_IMU;
 
     odomAftMapped.twist.twist.linear.x = vel_base(0);
     odomAftMapped.twist.twist.linear.y = vel_base(1);
     odomAftMapped.twist.twist.linear.z = vel_base(2);
 
-    // 计算角速度
-    static SO3 last_rot = SO3::Identity();
-    SO3 delta_rot = state_point.rot * last_rot.conjugate();
-    last_rot = state_point.rot;
-    vect3 ang_vel_body = SO3::log(delta_rot); // TODO: 需要计算dt
-    // 角速度转到 base_link_frame
-    vect3 ang_vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * ang_vel_body;
+    // 角速度从 IMU 体系转到 base_link_frame：R_BI = R_BL * R_LI^T
+    vect3 ang_vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * omega_IMU;
 
     odomAftMapped.twist.twist.angular.x = ang_vel_base(0);
     odomAftMapped.twist.twist.angular.y = ang_vel_base(1);
@@ -1247,8 +1261,8 @@ private:
                 s_plot8[time_log_counter] = kdtree_size_end;
                 s_plot9[time_log_counter] = aver_time_consu;
                 s_plot10[time_log_counter] = add_point_size;
-                time_log_counter ++;
-                printf("[ mapping ]: time: IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f \n",t1-t0,aver_time_match,aver_time_solve,t3-t1,t5-t3,aver_time_consu,aver_time_icp, aver_time_const_H_time);
+                // time_log_counter ++;
+                // printf("[ mapping ]: time: IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f \n",t1-t0,aver_time_match,aver_time_solve,t3-t1,t5-t3,aver_time_consu,aver_time_icp, aver_time_const_H_time);
                 ext_euler = SO3ToEuler(state_point.offset_R_L_I);
                 fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose()<< " " << ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<<" "<< state_point.vel.transpose() \
                 <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
@@ -1328,9 +1342,19 @@ private:
         imu_odometry.pose.pose.orientation.z = q_base.z();
         imu_odometry.pose.pose.orientation.w = q_base.w();
 
-        // 线速度在 base_link_frame 下
-        vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel; // vel_imu
-        vect3 vel_base = base_R_lidar * imu_state.offset_R_L_I.toRotationMatrix().transpose() * vel_body; 
+        // 线速度在 base_link_frame 下，需修正 IMU 与 base_link 偏移引起的速度差
+        vect3 vel_imu_in_IMU = imu_state.rot.conjugate() * imu_state.vel; // IMU 原点速度在 IMU 体系
+
+        // IMU 体系角速度（减去陀螺仪偏置）
+        vect3 omega_IMU = smoothed_ang_vel - imu_state.bg;
+
+        // 刚体速度修正：p_base 在 IMU 体系中的偏移
+        V3D t_base_in_IMU = imu_state.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar)
+                            + imu_state.offset_T_L_I;
+        // v_base = v_imu + omega_IMU × (p_base - p_imu)，均在 IMU 体系下
+        vect3 vel_base_in_IMU = vel_imu_in_IMU + omega_IMU.cross(t_base_in_IMU);
+        // 旋转到 base_link 体系
+        vect3 vel_base = base_R_lidar * imu_state.offset_R_L_I.toRotationMatrix().transpose() * vel_base_in_IMU;
 
         imu_odometry.twist.twist.linear.x = vel_base(0);
         imu_odometry.twist.twist.linear.y = vel_base(1);
