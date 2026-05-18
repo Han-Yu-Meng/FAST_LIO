@@ -17,8 +17,10 @@ enum LID_TYPE
   VELO16,
   OUST64,
   MID360,
-  UNILIDAR
-};  //{1, 2, 3}
+  UNILIDAR,
+  RSM1,       // RoboSense M1/Airy LiDAR
+  RSM1_BREAK  // RoboSense M1/Airy LiDAR, break scan into sub-scans
+};  //{1, 2, 3, 4, 5, 6, 7}
 enum TIME_UNIT
 {
   SEC = 0,
@@ -153,6 +155,26 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(unilidar_ros::Point,
   (float, time, time)
 )
 
+// RoboSense M1/Airy point type
+namespace robosenseM1_ros {
+    struct Point {
+        PCL_ADD_POINT4D
+        PCL_ADD_INTENSITY;
+        uint16_t ring;
+        double timestamp;
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    } EIGEN_ALIGN16;
+}
+POINT_CLOUD_REGISTER_POINT_STRUCT (
+        robosenseM1_ros::Point,
+        (float, x, x)
+        (float, y, y)
+        (float, z, z)
+        (float, intensity, intensity)
+        (uint16_t, ring, ring)
+        (double, timestamp, timestamp)
+)
+
 
 class Preprocess
 {
@@ -164,6 +186,8 @@ class Preprocess
   
   void process(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out);
+  void process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out,
+               int i_sub_cloud, int num_sub_cloud, double &start_time, double &end_time);
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
   // sensor_msgs::PointCloud2::ConstPtr pointcloud;
@@ -182,6 +206,8 @@ private:
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void unilidar_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
+  void robosenseM1_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg,
+                           int i_sub_cloud, int num_sub_cloud, double &start_time, double &end_time);
   void default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);
   void pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct);

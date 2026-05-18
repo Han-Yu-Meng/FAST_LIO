@@ -82,6 +82,7 @@ double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_pl
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+bool   airy_ned_to_flu_en = false;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -105,6 +106,7 @@ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+int    num_sub_cloud = 1;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false, tf_pub_en = false;
@@ -118,6 +120,15 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+
+inline M3D get_ned_to_flu_rotation()
+{
+    M3D ned_to_flu;
+    ned_to_flu << 1,  0,  0,
+                  0, -1,  0,
+                  0,  0, -1;
+    return ned_to_flu;
+}
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -810,6 +821,7 @@ public:
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
         this->declare_parameter<bool>("common.use_imu_odometry", true);
+        this->declare_parameter<bool>("common.airy_ned_to_flu_en", false);
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
         this->declare_parameter<double>("filter_size_map", 0.5);
@@ -826,6 +838,7 @@ public:
         this->declare_parameter<int>("preprocess.timestamp_unit", US);
         this->declare_parameter<int>("preprocess.scan_rate", 10);
         this->declare_parameter<int>("point_filter_num", 2);
+        this->declare_parameter<int>("mapping.num_sub_cloud", 1);
         this->declare_parameter<bool>("feature_extract_enable", false);
         this->declare_parameter<bool>("runtime_pos_log_enable", false);
         this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
@@ -853,6 +866,7 @@ public:
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<bool>("common.use_imu_odometry", use_imu_odometry_, true);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+        this->get_parameter_or<bool>("common.airy_ned_to_flu_en", airy_ned_to_flu_en, false);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
@@ -869,6 +883,7 @@ public:
         this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
         this->get_parameter_or<int>("preprocess.scan_rate", p_pre->SCAN_RATE, 10);
         this->get_parameter_or<int>("point_filter_num", p_pre->point_filter_num, 2);
+        this->get_parameter_or<int>("mapping.num_sub_cloud", num_sub_cloud, 1);
         this->get_parameter_or<bool>("feature_extract_enable", p_pre->feature_enabled, false);
         this->get_parameter_or<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
         this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
@@ -901,6 +916,12 @@ public:
 
         Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
         Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
+        if (airy_ned_to_flu_en)
+        {
+            const M3D ned_to_flu = get_ned_to_flu_rotation();
+            Lidar_R_wrt_IMU = ned_to_flu * Lidar_R_wrt_IMU;
+            Lidar_T_wrt_IMU = ned_to_flu * Lidar_T_wrt_IMU;
+        }
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
         p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
         p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
@@ -995,11 +1016,24 @@ private:
             is_first_lidar = false;
         }
 
-        PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-        p_pre->process(msg, ptr);
-        lidar_buffer.push_back(ptr);
-        time_buffer.push_back(cur_time);
-        last_timestamp_lidar = cur_time;
+        if (p_pre->lidar_type == RSM1_BREAK) {
+            double start_time, end_time;
+            for (int i_sub_cloud = 0; i_sub_cloud < num_sub_cloud; i_sub_cloud++) {
+                PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
+                p_pre->process(msg, ptr, i_sub_cloud, num_sub_cloud, start_time, end_time);
+                lidar_buffer.push_back(ptr);
+                time_buffer.push_back(start_time);
+                last_timestamp_lidar = start_time;
+                sig_buffer.notify_all();
+            }
+            lidar_end_time = end_time;
+        } else {
+            PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+            p_pre->process(msg, ptr);
+            lidar_buffer.push_back(ptr);
+            time_buffer.push_back(cur_time);
+            last_timestamp_lidar = cur_time;
+        }
         s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
         mtx_buffer.unlock();
         sig_buffer.notify_all();
@@ -1051,6 +1085,14 @@ private:
           // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
           sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
+        if (airy_ned_to_flu_en)
+        {
+            // Airy IMU vectors are reported in NED; FAST-LIO expects FLU.
+            msg->angular_velocity.y *= -1.0;
+            msg->angular_velocity.z *= -1.0;
+            msg->linear_acceleration.y *= -1.0;
+            msg->linear_acceleration.z *= -1.0;
+        }
 
           msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
           if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
@@ -1084,16 +1126,20 @@ private:
         }
 
         V3D ang_vel, acc;
-        ang_vel << msg_in->angular_velocity.x, msg_in->angular_velocity.y, msg_in->angular_velocity.z;
-        acc << msg_in->linear_acceleration.x, msg_in->linear_acceleration.y, msg_in->linear_acceleration.z;
+        // Use the ned_to_flu-converted msg (not raw msg_in) so that kf_copy.predict() receives
+        // data consistent with the FLU extrinsics used by FAST-LIO when airy_ned_to_flu_en=true.
+        ang_vel << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
+        acc << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
         acc = acc * G_m_s2 / p_imu->get_mean_acc().norm();
 
         input_ikfom in;
         in.acc = acc;
         in.gyro = ang_vel;
 
-        process_and_publish_imu_odometry(msg_in, dt, in, use_imu_odometry_);
-         
+        // Pass the converted msg (SharedPtr) so that process_and_publish_imu_odometry also
+        // works on FLU-converted angular velocity for smoothing and omega_IMU computation.
+        process_and_publish_imu_odometry(msg, dt, in, use_imu_odometry_);
+
         auto t2 = omp_get_wtime();
         // std::cout << "[IMU Process] Add to buffter, time cost " << t1 - t0 << "s" << std::endl;
         // std::cout << "[IMU Process] Predict imu state, time cost: " << t2 - t1 << "s" << std::endl;
@@ -1114,6 +1160,14 @@ private:
                         geometry_msgs::msg::TransformStamped transformStamped = tf_buffer_->lookupTransform(base_link_frame, base_lidar_frame, tf2::TimePointZero);
                         base_T_lidar = V3D(transformStamped.transform.translation.x, transformStamped.transform.translation.y, transformStamped.transform.translation.z);
                         base_R_lidar = Eigen::Quaterniond(transformStamped.transform.rotation.w, transformStamped.transform.rotation.x, transformStamped.transform.rotation.y, transformStamped.transform.rotation.z).toRotationMatrix();
+                        // When airy_ned_to_flu_en is true, FAST-LIO internally tracks the "virtual FLU lidar frame"
+                        // (obtained by applying ned_to_flu to the physical NED lidar frame).
+                        // The TF gives R_{base <- NED_physical}, but we need R_{base <- FLU_virtual}:
+                        //   R_{base <- FLU_virtual} = R_{base <- NED_physical} * ned_to_flu
+                        if (airy_ned_to_flu_en)
+                        {
+                            base_R_lidar = base_R_lidar * get_ned_to_flu_rotation();
+                        }
                         static_transform_received = true;
                         RCLCPP_INFO(this->get_logger(), "Static transform from %s to %s received.", base_link_frame.c_str(), base_lidar_frame.c_str());
                     } catch (tf2::TransformException &ex) {
@@ -1293,7 +1347,7 @@ private:
     }
 
     void process_and_publish_imu_odometry(
-        const sensor_msgs::msg::Imu::UniquePtr& msg_in,
+        const sensor_msgs::msg::Imu::SharedPtr& msg_in,
         double dt,
         const input_ikfom& in,
         bool use_imu_odometry

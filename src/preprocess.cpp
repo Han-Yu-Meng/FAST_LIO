@@ -89,8 +89,41 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, Po
       unilidar_handler(msg);
       break;
 
+    case RSM1:
+    case RSM1_BREAK:
+    {
+      double start_time, end_time;
+      robosenseM1_handler(msg, 0, 1, start_time, end_time);
+      break;
+    }
+
     default:
       default_handler(msg);
+      break;
+  }
+  *pcl_out = pl_surf;
+}
+
+void Preprocess::process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out,
+                         int i_sub_cloud, int num_sub_cloud, double &start_time, double &end_time)
+{
+  switch (time_unit)
+  {
+    case SEC:  time_unit_scale = 1.e3f;  break;
+    case MS:   time_unit_scale = 1.f;    break;
+    case US:   time_unit_scale = 1.e-3f; break;
+    case NS:   time_unit_scale = 1.e-6f; break;
+    default:   time_unit_scale = 1.f;    break;
+  }
+
+  switch (lidar_type)
+  {
+    case RSM1:
+    case RSM1_BREAK:
+      robosenseM1_handler(msg, i_sub_cloud, num_sub_cloud, start_time, end_time);
+      break;
+    default:
+      std::cerr << "Error: lidar_type " << lidar_type << " does not support sub_cloud processing" << std::endl;
       break;
   }
   *pcl_out = pl_surf;
@@ -870,11 +903,6 @@ void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& t
       continue;
     }
 
-    if (types[i - 1].dista < 1e-8 || types[i].dista < 1e-8)
-    {
-      continue;
-    }
-
     if (types[i].ftype == Nor)
     {
       if (types[i - 1].dista > types[i].dista)
@@ -1115,4 +1143,187 @@ bool Preprocess::edge_jump_judge(const PointCloudXYZI& pl, vector<orgtype>& type
   }
 
   return true;
+}
+
+void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg,
+                                     int i_sub_cloud, int num_sub_cloud, double &start_time, double &end_time)
+{
+    pl_surf.clear();
+    pl_corn.clear();
+    pl_full.clear();
+
+    // Check if point cloud has ring and timestamp fields
+    bool has_ring = false;
+    bool has_timestamp = false;
+    for (const auto& field : msg->fields) {
+        if (field.name == "ring") has_ring = true;
+        if (field.name == "timestamp") has_timestamp = true;
+    }
+
+    int plsize = 0;
+    double msg_time = rclcpp::Time(msg->header.stamp).seconds();
+
+    // Fallback: no ring/timestamp fields, use standard PointXYZI
+    if (!has_ring || !has_timestamp) {
+        pcl::PointCloud<pcl::PointXYZI> pl_orig;
+        try {
+            pcl::fromROSMsg(*msg, pl_orig);
+            plsize = pl_orig.size();
+            if (plsize == 0) return;
+
+            start_time = msg_time;
+            end_time   = msg_time;
+
+            if (feature_enabled) {
+                for (int i = 0; i < N_SCANS; i++) {
+                    pl_buff[i].clear();
+                    pl_buff[i].reserve(plsize);
+                }
+                int points_per_scan = (msg->height > 0) ? (plsize / msg->height) : (plsize / N_SCANS);
+                if (points_per_scan == 0) points_per_scan = 1;
+
+                for (int i = 0; i < plsize; i++) {
+                    if (i % point_filter_num != 0) continue;
+                    double range = sqrt(pl_orig.points[i].x * pl_orig.points[i].x +
+                                        pl_orig.points[i].y * pl_orig.points[i].y +
+                                        pl_orig.points[i].z * pl_orig.points[i].z);
+                    if (range < 150 && range > blind) {
+                        PointType added_pt;
+                        added_pt.x = pl_orig.points[i].x;
+                        added_pt.y = pl_orig.points[i].y;
+                        added_pt.z = pl_orig.points[i].z;
+                        added_pt.intensity = pl_orig.points[i].intensity;
+                        added_pt.normal_x = added_pt.normal_y = added_pt.normal_z = 0;
+                        added_pt.curvature = 0.0;
+                        int estimated_ring = (i / points_per_scan) % N_SCANS;
+                        if (estimated_ring < N_SCANS)
+                            pl_buff[estimated_ring].push_back(added_pt);
+                    }
+                }
+                for (int j = 0; j < N_SCANS; j++) {
+                    PointCloudXYZI &pl = pl_buff[j];
+                    int linesize = pl.size();
+                    if (linesize < 2) continue;
+                    vector<orgtype> &types = typess[j];
+                    types.clear();
+                    types.resize(linesize);
+                    linesize--;
+                    for (uint i = 0; i < (uint)linesize; i++) {
+                        types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
+                        vx = pl[i].x - pl[i+1].x;
+                        vy = pl[i].y - pl[i+1].y;
+                        vz = pl[i].z - pl[i+1].z;
+                        types[i].dista = vx*vx + vy*vy + vz*vz;
+                    }
+                    types[linesize].range = sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
+                    give_feature(pl, types);
+                }
+            } else {
+                for (int i = 0; i < plsize; i++) {
+                    if (i % point_filter_num != 0) continue;
+                    double range = sqrt(pl_orig.points[i].x * pl_orig.points[i].x +
+                                        pl_orig.points[i].y * pl_orig.points[i].y +
+                                        pl_orig.points[i].z * pl_orig.points[i].z);
+                    if (range < 150 && range > blind) {
+                        PointType added_pt;
+                        added_pt.x = pl_orig.points[i].x;
+                        added_pt.y = pl_orig.points[i].y;
+                        added_pt.z = pl_orig.points[i].z;
+                        added_pt.intensity = pl_orig.points[i].intensity;
+                        added_pt.normal_x = added_pt.normal_y = added_pt.normal_z = 0;
+                        added_pt.curvature = 0.0;
+                        pl_surf.points.push_back(added_pt);
+                    }
+                }
+                // std::cout << " point_size_downsample: " << pl_surf.size() << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error converting point cloud: " << e.what() << std::endl;
+        }
+        return;
+    }
+
+    // Normal path: has ring and timestamp fields
+    pcl::PointCloud<robosenseM1_ros::Point> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+    plsize = pl_orig.size();
+    pl_corn.reserve(plsize);
+    pl_surf.reserve(plsize);
+
+    if (feature_enabled) {
+        for (int i = 0; i < N_SCANS; i++) {
+            pl_buff[i].clear();
+            pl_buff[i].reserve(plsize);
+        }
+        int num_point_each_sub_cloud = plsize / pl_orig.width / num_sub_cloud;
+        for (int i_ori_width = 0; i_ori_width < (int)pl_orig.width; i_ori_width++) {
+            for (int i_ori_height = num_point_each_sub_cloud * i_sub_cloud;
+                 i_ori_height < num_point_each_sub_cloud * (i_sub_cloud + 1); i_ori_height++) {
+                robosenseM1_ros::Point &ori_point = pl_orig.at(i_ori_width, i_ori_height);
+                if (i_ori_height == num_point_each_sub_cloud * i_sub_cloud)
+                    start_time = ori_point.timestamp;
+                else if (i_ori_height == num_point_each_sub_cloud * (i_sub_cloud + 1) - 1)
+                    end_time = ori_point.timestamp;
+                if (i_ori_height % point_filter_num != 0) continue;
+                double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
+                if (range < 150 && range > blind) {
+                    PointType added_pt;
+                    added_pt.x = ori_point.x;
+                    added_pt.y = ori_point.y;
+                    added_pt.z = ori_point.z;
+                    added_pt.intensity = ori_point.intensity;
+                    added_pt.normal_x = added_pt.normal_y = added_pt.normal_z = 0;
+                    added_pt.curvature = (ori_point.timestamp - start_time) * time_unit_scale;
+                    if (i_ori_width < N_SCANS)
+                        pl_buff[i_ori_width].push_back(added_pt);
+                }
+            }
+        }
+        for (int j = 0; j < N_SCANS; j++) {
+            PointCloudXYZI &pl = pl_buff[j];
+            int linesize = pl.size();
+            if (linesize < 2) continue;
+            vector<orgtype> &types = typess[j];
+            types.clear();
+            types.resize(linesize);
+            linesize--;
+            for (uint i = 0; i < (uint)linesize; i++) {
+                types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
+                vx = pl[i].x - pl[i+1].x;
+                vy = pl[i].y - pl[i+1].y;
+                vz = pl[i].z - pl[i+1].z;
+                types[i].dista = vx*vx + vy*vy + vz*vz;
+            }
+            types[linesize].range = sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
+            give_feature(pl, types);
+        }
+    } else {
+        std::vector<double> time_stamp_of_points;
+        int num_point_each_sub_cloud = plsize / pl_orig.width / num_sub_cloud;
+        for (int i_ori_width = 0; i_ori_width < (int)pl_orig.width; i_ori_width++) {
+            for (int i_ori_height = num_point_each_sub_cloud * i_sub_cloud;
+                 i_ori_height < num_point_each_sub_cloud * (i_sub_cloud + 1); i_ori_height++) {
+                robosenseM1_ros::Point &ori_point = pl_orig.at(i_ori_width, i_ori_height);
+                if (i_ori_height == num_point_each_sub_cloud * i_sub_cloud)
+                    start_time = ori_point.timestamp;
+                else if (i_ori_height == num_point_each_sub_cloud * (i_sub_cloud + 1) - 1)
+                    end_time = ori_point.timestamp;
+                if (i_ori_height % point_filter_num != 0) continue;
+                double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
+                if (range < 150 && range > blind) {
+                    PointType added_pt;
+                    added_pt.x = ori_point.x;
+                    added_pt.y = ori_point.y;
+                    added_pt.z = ori_point.z;
+                    added_pt.intensity = ori_point.intensity;
+                    added_pt.normal_x = added_pt.normal_y = added_pt.normal_z = 0;
+                    added_pt.curvature = (ori_point.timestamp - start_time) * time_unit_scale;
+                    time_stamp_of_points.push_back(added_pt.curvature);
+                    pl_surf.points.push_back(added_pt);
+                }
+            }
+        }
+        std::sort(time_stamp_of_points.begin(), time_stamp_of_points.end());
+        // std::cout << " point_size_downsample: " << pl_surf.size() << std::endl;
+    }
 }
