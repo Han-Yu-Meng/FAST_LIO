@@ -1995,7 +1995,7 @@ private:
         double pos_dis = temp_vec.block( 3, 0, 3, 1 ).norm();
         if ( angular_dis >= 20 || pos_dis > 1 )
         {
-            printf( "Angular dis = %.2f, pos dis = %.2f\r\n", angular_dis, pos_dis );
+            // printf( "Angular dis = %.2f, pos dis = %.2f\r\n", angular_dis, pos_dis );
             temp_vec.setZero();
         }
         return temp_vec;

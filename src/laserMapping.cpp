@@ -933,7 +933,7 @@ void loop_once() {
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
-                fins_node->logger->warn("No point, skip this scan!\n");
+                fins_node->logger->warn("No point, skip this scan!");
                 return ;
             }
         }
@@ -968,7 +968,7 @@ void loop_once() {
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                fins_node->logger->warn("No point, skip this scan!\n");
+                fins_node->logger->warn("No point, skip this scan!");
                 return ;
             }
             
