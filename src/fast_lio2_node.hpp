@@ -40,6 +40,7 @@ public:
                                                          &FastLIO::on_transform);
 
     register_output<pcl::PointCloud<pcl::PointXYZI>::Ptr>("cloud");
+    register_output<pcl::PointCloud<pcl::PointXYZI>::Ptr>("cloud_body");
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
     register_output<geometry_msgs::msg::TransformStamped>("$T_{odom}^{base}$");

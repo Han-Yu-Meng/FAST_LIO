@@ -275,6 +275,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
+    publish_raw_body(ptr, t);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(get_time_sec(msg->header.stamp));
     acq_time_buffer.push_back(t);
@@ -312,6 +313,7 @@ void livox_pcl_cbk(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, fin
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
+    publish_raw_body(ptr, t);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
     acq_time_buffer.push_back(t);
@@ -366,7 +368,7 @@ void process_and_publish_imu_odometry(
     Eigen::Quaterniond q_base(R_odom_base);
 
     nav_msgs::msg::Odometry imu_odometry;
-    imu_odometry.header.stamp = msg_in->header.stamp;
+    imu_odometry.header.stamp = fins::to_ros_msg_time(t);
     imu_odometry.header.frame_id = initial_frame;
     imu_odometry.child_frame_id = base_link_frame;
 
@@ -378,10 +380,17 @@ void process_and_publish_imu_odometry(
     imu_odometry.pose.pose.orientation.z = q_base.z();
     imu_odometry.pose.pose.orientation.w = q_base.w();
 
-    vect3 vel_body = imu_state.rot.conjugate() * imu_state.vel; // vel_imu
-    // 线速度在 base_link_frame 下
+    // 计算线速度
+    vect3 vel_imu_in_IMU = imu_state.rot.conjugate() * imu_state.vel; // vel_imu
+
+    // 刚体速度修正：v_base = v_imu + omega_IMU × (p_base - p_imu)，均在 IMU 体系下
+    V3D t_base_in_IMU = imu_state.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar)
+                        + imu_state.offset_T_L_I;
+    vect3 vel_base_in_IMU = vel_imu_in_IMU + smoothed_ang_vel.cross(t_base_in_IMU);
+
+    // 再从 IMU 体系旋转到 base_link 体系
     M3D R_L_I_T = R_L_I.transpose();
-    vect3 vel_base = base_R_lidar * R_L_I_T * vel_body; 
+    vect3 vel_base = base_R_lidar * R_L_I_T * vel_base_in_IMU; 
     imu_odometry.twist.twist.linear.x = vel_base(0);
     imu_odometry.twist.twist.linear.y = vel_base(1);
     imu_odometry.twist.twist.linear.z = vel_base(2);
@@ -587,8 +596,36 @@ void publish_frame_world(const fins::AcqTime &acq_time)
         }
         
         laserCloudWorld->header.frame_id = initial_frame;
+        laserCloudWorld->header.stamp = fins::to_microseconds(acq_time);
         
         fins_node->send("cloud", laserCloudWorld, acq_time);
+    }
+}
+
+void publish_raw_body(const PointCloudXYZI::Ptr& ptr, const fins::AcqTime &acq_time)
+{
+    if(fins_node->required("cloud_body") && static_transform_received)
+    {
+        int size = ptr->points.size();
+        pcl::PointCloud<pcl::PointXYZI>::Ptr laserCloudBody(new pcl::PointCloud<pcl::PointXYZI>(size, 1));
+
+        for (int i = 0; i < size; i++)
+        {
+            const auto &p_in = ptr->points[i];
+            auto &p_out = laserCloudBody->points[i];
+            
+            V3D p_L(p_in.x, p_in.y, p_in.z);
+            V3D p_B = base_R_lidar * p_L + base_T_lidar;
+            
+            p_out.x = p_B(0);
+            p_out.y = p_B(1);
+            p_out.z = p_B(2);
+            p_out.intensity = p_in.intensity;
+        }
+        
+        laserCloudBody->header.frame_id = base_link_frame;
+        laserCloudBody->header.stamp = fins::to_microseconds(acq_time);
+        fins_node->send("cloud_body", laserCloudBody, acq_time);
     }
 }
 
@@ -628,7 +665,7 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
     if (fins_node->required("odometry") || fins_node->required("$T_{odom}^{base}$")) {
         odomAftMapped.header.frame_id = initial_frame;
         odomAftMapped.child_frame_id = base_link_frame;
-        odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
+        odomAftMapped.header.stamp = fins::to_ros_msg_time(acq_time);
 
         // Transform state_point.pos and state_point.rot to base_link_frame
         // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
@@ -645,28 +682,38 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
         odomAftMapped.pose.pose.orientation.w = q_base.w();
 
         // 计算线速度
-        vect3 vel_body = state_point.rot.conjugate() * state_point.vel;
-        // 线速度在 base_link_frame 下
-        vect3 vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * vel_body; 
+        // state_point.vel 是 IMU 原点在世界系下的速度，先转到 IMU 体系
+        vect3 vel_imu_in_IMU = state_point.rot.conjugate() * state_point.vel;
+
+        // 计算角速度：使用相邻两帧 lidar 时间戳计算 dt，从而得到真实角速度 (rad/s)
+        static SO3 last_rot = SO3::Identity();
+        static double last_lidar_time = 0;
+        double dt_ang = lidar_end_time - last_lidar_time;
+        SO3 delta_rot = state_point.rot * last_rot.conjugate();
+        last_rot = state_point.rot;
+        double current_lidar_time = lidar_end_time;
+        last_lidar_time = current_lidar_time;
+
+        // SO3::log(R_new * R_old^T) / dt 得到世界系角速度，再转到 IMU 体系
+        vect3 ang_vel_world = (dt_ang > 1e-6) ? vect3(SO3::log(delta_rot) / dt_ang) : vect3::Zero();
+        vect3 omega_IMU = state_point.rot.toRotationMatrix().transpose() * ang_vel_world;
+
+        // 刚体速度修正：v_base = v_imu + omega_IMU × (p_base - p_imu)，均在 IMU 体系下
+        // p_base 在 IMU 体系中的位置：先从 base 转到 lidar，再从 lidar 转到 IMU
+        V3D t_base_in_IMU = state_point.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar)
+                            + state_point.offset_T_L_I;
+        vect3 vel_base_in_IMU = vel_imu_in_IMU + omega_IMU.cross(t_base_in_IMU);
+
+        // 再从 IMU 体系旋转到 base_link 体系：R_base_IMU = base_R_lidar * R_LI^T
+        vect3 vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * vel_base_in_IMU;
+
         odomAftMapped.twist.twist.linear.x = vel_base(0);
         odomAftMapped.twist.twist.linear.y = vel_base(1);
         odomAftMapped.twist.twist.linear.z = vel_base(2);
 
-        // 计算角速度
-        static double last_lidar_end_time = 0;
-        static SO3 last_rot = SO3::Identity();
-        SO3 delta_rot =  state_point.rot * last_rot.conjugate();
-        vect3 ang_vel_body;
-        ang_vel_body.setZero();
-        if (last_lidar_end_time > 0) {
-            double dt = lidar_end_time - last_lidar_end_time;
-            ang_vel_body = SO3::log(delta_rot) / dt;
-        }
-        last_rot = state_point.rot;
-        last_lidar_end_time = lidar_end_time;
+        // 角速度从 IMU 体系转到 base_link_frame：R_BI = R_BL * R_LI^T
+        vect3 ang_vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * omega_IMU;
 
-        // 角速度转到 base_link_frame
-        vect3 ang_vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * ang_vel_body;
         odomAftMapped.twist.twist.angular.x = ang_vel_base(0);
         odomAftMapped.twist.twist.angular.y = ang_vel_base(1);
         odomAftMapped.twist.twist.angular.z = ang_vel_base(2);
@@ -692,7 +739,7 @@ void publish_path(const fins::AcqTime &acq_time)
 {
     if (fins_node->required("path")) {
         set_posestamp(msg_body_pose);
-        msg_body_pose.header.stamp = get_ros_time(lidar_end_time);
+        msg_body_pose.header.stamp = fins::to_ros_msg_time(acq_time);
         msg_body_pose.header.frame_id = initial_frame;
 
         path.header.stamp = msg_body_pose.header.stamp;
