@@ -893,41 +893,107 @@ void initialize() {
 
     std::fill(epsi, epsi + 23, 0.001);
 
-    NUM_MAX_ITERATIONS = fins::param_server().get("FastLIO.max_iteration", 4);
-    filter_size_surf_min = fins::param_server().get("FastLIO.filter_size_surf", 0.5);
-    filter_size_map_min = fins::param_server().get("FastLIO.filter_size_map", 0.5);
-    cube_len = fins::param_server().get("FastLIO.cube_side_length", 200.0);
+    NUM_MAX_ITERATIONS = fins::param_server().get("FastLIO.max_iteration", 4)
+                            .with_description("max iteration")
+                            .greater_than(0);
+    
+    filter_size_surf_min = fins::param_server().get("FastLIO.filter_size_surf", 0.5)
+                            .with_description("filter size of surface")
+                            .greater_than(0.0);
+    
+    filter_size_map_min = fins::param_server().get("FastLIO.filter_size_map", 0.5)
+                            .with_description("filter size of map")
+                            .greater_than(0.0);
+        
+    cube_len = fins::param_server().get("FastLIO.cube_side_length", 200.0)
+                            .with_description("cube side length")
+                            .greater_than(0.00);
 
     fins::ParamLoader common("FastLIO.common");
-    initial_frame = common.get("initial_frame", "odom");
-    base_link_frame = common.get("base_link_frame", "base_link");
-    base_lidar_frame = common.get("base_lidar_frame", "base_lidar");
-    time_sync_en = common.get("time_sync_en", false);
-    time_diff_lidar_to_imu = common.get("time_offset_lidar_to_imu", 0.0);
-    use_imu_odometry_ = common.get("use_imu_odometry", false);
-    imu_window_size = common.get("imu_window_size", 10);
-    imu_time_tolerance = common.get("imu_time_tolerance", 0.01);
+
+    initial_frame = common.get("initial_frame", "odom")
+                          .with_description("initial frame");
+
+    base_link_frame = common.get("base_link_frame", "base_link")
+                            .with_description("base link frame");
+
+    base_lidar_frame = common.get("base_lidar_frame", "base_lidar")
+                             .with_description("lidar frame");
+
+    time_sync_en = common.get("time_sync_en", false)
+                          .with_description("enable time synchronization");
+
+    time_diff_lidar_to_imu = common.get("time_offset_lidar_to_imu", 0.0)
+                                   .with_description("time offset between lidar and imu")
+                                   .greater_than(0.0);
+
+    use_imu_odometry_ = common.get("use_imu_odometry", false)
+                              .with_description("use imu odometry");
+
+    imu_window_size = common.get("imu_window_size", 10)
+                            .with_description("imu window size")
+                            .greater_than(0);
+    
+    imu_time_tolerance = common.get("imu_time_tolerance", 0.00)
+                               .with_description("imu time tolerance")
+                               .greater_than(0.00);
 
     fins::ParamLoader preprocess("FastLIO.preprocess");
-    p_pre->blind = preprocess.get("blind", 0.5);
-    p_pre->lidar_type = static_cast<LID_TYPE>(preprocess.get<int>("lidar_type", AVIA));
+
+    p_pre->blind = preprocess.get("blind", 0.5)
+                             .with_description("blind radius")
+                             .greater_than(0.0);
+
+    p_pre->lidar_type = preprocess.get<int>("lidar_type", AVIA)
+                             .with_description("AVIA = 1, VELO16 = 2, OUST64 = 3, MARSIM = 4")
+                             .one_of({LID_TYPE::AVIA, LID_TYPE::VELO16, LID_TYPE::OUST64, LID_TYPE::MARSIM});
     lidar_type = p_pre->lidar_type;
-    p_pre->N_SCANS = preprocess.get("scan_line", 16);
-    p_pre->time_unit = static_cast<TIME_UNIT>(preprocess.get<int>("timestamp_unit", US));
-    p_pre->SCAN_RATE = preprocess.get("scan_rate", 10);
-    p_pre->feature_enabled = preprocess.get("feature_extract_enable", false);
-    p_pre->point_filter_num = preprocess.get("point_filter_num", 2);
+
+    p_pre->N_SCANS = preprocess.get("scan_line", 16)
+                               .with_description("scan line")
+                               .greater_than(0);
+
+    p_pre->time_unit = preprocess.get<int>("timestamp_unit", US)
+                             .with_description("SEC = 0, MS = 1, US = 2, NS = 3")
+                             .one_of({TIME_UNIT::SEC, TIME_UNIT::MS, TIME_UNIT::US, TIME_UNIT::NS});
+
+    p_pre->SCAN_RATE = preprocess.get("scan_rate", 10)
+                                 .with_description("scan rate")
+                                 .greater_than(0);
+
+    p_pre->feature_enabled = preprocess.get("feature_extract_enable", false)
+                                       .with_description("enable feature extraction");
+
+    p_pre->point_filter_num = preprocess.get("point_filter_num", 2)
+                               .with_description("point filter number")
+                               .greater_than(0);
 
     fins::ParamLoader mapping("FastLIO.mapping");
-    acc_cov = mapping.get("acc_cov", 0.1);
-    gyr_cov = mapping.get("gyr_cov", 0.1);
-    b_acc_cov = mapping.get("b_acc_cov", 0.0001);
-    b_gyr_cov = mapping.get("b_gyr_cov", 0.0001);
-    fov_deg = mapping.get("fov_degree", 180.0);
-    DET_RANGE = mapping.get("det_range", 300.0f);
-    extrinsic_est_en = mapping.get("extrinsic_est_en", false);
-    extrinT = mapping.get("extrinsic_T", std::vector<double>{-0.011, -0.02329, 0.04412});
-    extrinR = mapping.get("extrinsic_R", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1});
+    acc_cov = mapping.get("acc_cov", 0.1)
+               .with_description("acceleration covariance")
+               .greater_than(0.0);
+    gyr_cov = mapping.get("gyr_cov", 0.1)
+               .with_description("gyroscope covariance")
+               .greater_than(0.0);
+    b_acc_cov = mapping.get("b_acc_cov", 0.0001)
+               .with_description("acceleration bias covariance")
+               .greater_than(0.0);
+    b_gyr_cov = mapping.get("b_gyr_cov", 0.0001)
+               .with_description("gyroscope bias covariance")
+               .greater_than(0.0);
+    fov_deg = mapping.get("fov_degree", 180.0)
+               .with_description("FOV degree")
+               .greater_than(0.0);
+    DET_RANGE = mapping.get("det_range", 300.0f)
+               .with_description("detection range")
+               .greater_than(0.0f);
+
+    extrinsic_est_en = mapping.get("extrinsic_est_en", false)
+                              .with_description("enable extrinsic estimation");
+    extrinT = mapping.get("extrinsic_T", std::vector<double>{-0.011, -0.02329, 0.04412})
+               .with_description("extrinsic translation");
+    extrinR = mapping.get("extrinsic_R", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1})
+               .with_description("extrinsic rotation");
     
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
     downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
