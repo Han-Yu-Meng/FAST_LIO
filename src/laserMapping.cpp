@@ -576,17 +576,49 @@ void set_posestamp(T & out)
 
 }
 
+inline void compute_odom_to_base_pose(
+    const M3D &R_odom_imu,
+    const V3D &t_odom_imu,
+    const M3D &R_imu_lidar,
+    const V3D &t_imu_lidar,
+    M3D &R_odom_base,
+    V3D &t_odom_base)
+{
+    // odom is defined as the initial base_link frame:
+    // T_(odom<-base) = T_BL * inv(T_IL) * T_OI * T_IL * inv(T_BL)
+    const M3D R_lidar_imu = R_imu_lidar.transpose();
+    const V3D t_lidar_imu = -R_lidar_imu * t_imu_lidar;
+    const M3D R_lidar_base = base_R_lidar.transpose();
+    const V3D t_lidar_base = -R_lidar_base * base_T_lidar;
+
+    const M3D R1 = base_R_lidar * R_lidar_imu;
+    const V3D t1 = base_R_lidar * t_lidar_imu + base_T_lidar;
+
+    const M3D R2 = R1 * R_odom_imu;
+    const V3D t2 = R1 * t_odom_imu + t1;
+
+    const M3D R3 = R2 * R_imu_lidar;
+    const V3D t3 = R2 * t_imu_lidar + t2;
+
+    R_odom_base = R3 * R_lidar_base;
+    t_odom_base = R3 * t_lidar_base + t3;
+}
+
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
     odomAftMapped.header.frame_id = initial_frame;
     odomAftMapped.child_frame_id = base_link_frame;
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     
-    // Transform state_point.pos and state_point.rot to base_link_frame
-    // If the initial frame is at the base_link position, we need to transform the whole relative motion back to base_link
-    // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
-    M3D R_odom_base = base_R_lidar * state_point.rot.toRotationMatrix() * state_point.offset_R_L_I.toRotationMatrix() * base_R_lidar.transpose();
-    V3D t_odom_base = base_R_lidar * (state_point.rot.toRotationMatrix() * (state_point.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar) + state_point.offset_T_L_I) + state_point.pos) + base_T_lidar;
+    M3D R_odom_base;
+    V3D t_odom_base;
+    compute_odom_to_base_pose(
+        state_point.rot.toRotationMatrix(),
+        state_point.pos,
+        state_point.offset_R_L_I.toRotationMatrix(),
+        state_point.offset_T_L_I,
+        R_odom_base,
+        t_odom_base);
     Eigen::Quaterniond q_base(R_odom_base);
 
     odomAftMapped.pose.pose.position.x = t_odom_base(0);
@@ -1160,14 +1192,6 @@ private:
                         geometry_msgs::msg::TransformStamped transformStamped = tf_buffer_->lookupTransform(base_link_frame, base_lidar_frame, tf2::TimePointZero);
                         base_T_lidar = V3D(transformStamped.transform.translation.x, transformStamped.transform.translation.y, transformStamped.transform.translation.z);
                         base_R_lidar = Eigen::Quaterniond(transformStamped.transform.rotation.w, transformStamped.transform.rotation.x, transformStamped.transform.rotation.y, transformStamped.transform.rotation.z).toRotationMatrix();
-                        // When airy_ned_to_flu_en is true, FAST-LIO internally tracks the "virtual FLU lidar frame"
-                        // (obtained by applying ned_to_flu to the physical NED lidar frame).
-                        // The TF gives R_{base <- NED_physical}, but we need R_{base <- FLU_virtual}:
-                        //   R_{base <- FLU_virtual} = R_{base <- NED_physical} * ned_to_flu
-                        if (airy_ned_to_flu_en)
-                        {
-                            base_R_lidar = base_R_lidar * get_ned_to_flu_rotation();
-                        }
                         static_transform_received = true;
                         RCLCPP_INFO(this->get_logger(), "Static transform from %s to %s received.", base_link_frame.c_str(), base_lidar_frame.c_str());
                     } catch (tf2::TransformException &ex) {
@@ -1377,10 +1401,15 @@ private:
         // 计算平滑后的角速度
         Eigen::Vector3d smoothed_ang_vel = avg_ang_vel_ / imu_ang_vel_window_.size();
 
-        // Transform imu_state.pos and imu_state.rot to base_link_frame
-        // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
-        M3D R_odom_base = base_R_lidar * imu_state.rot.toRotationMatrix() * imu_state.offset_R_L_I.toRotationMatrix() * base_R_lidar.transpose();
-        V3D t_odom_base = base_R_lidar * (imu_state.rot.toRotationMatrix() * (imu_state.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos) + base_T_lidar;
+        M3D R_odom_base;
+        V3D t_odom_base;
+        compute_odom_to_base_pose(
+            imu_state.rot.toRotationMatrix(),
+            imu_state.pos,
+            imu_state.offset_R_L_I.toRotationMatrix(),
+            imu_state.offset_T_L_I,
+            R_odom_base,
+            t_odom_base);
         Eigen::Quaterniond q_base(R_odom_base);
 
         nav_msgs::msg::Odometry imu_odometry;
