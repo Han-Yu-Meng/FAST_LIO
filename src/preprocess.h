@@ -15,7 +15,7 @@ using namespace std;
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
-enum LID_TYPE{AVIA = 1, VELO16, OUST64, MARSIM}; //{1, 2, 3}
+enum LID_TYPE{AVIA = 1, VELO16, OUST64, MARSIM, RSM1, RSAIRY}; //{1, 2, 3, 4, 5, 6}
 enum TIME_UNIT{SEC = 0, MS = 1, US = 2, NS = 3};
 enum Feature{Nor, Poss_Plane, Real_Plane, Edge_Jump, Edge_Plane, Wire, ZeroPoint};
 enum Surround{Prev, Next};
@@ -84,6 +84,25 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(ouster_ros::Point,
     (std::uint32_t, range, range)
 )
 
+namespace robosenseM1_ros {
+    struct Point {
+        PCL_ADD_POINT4D
+        PCL_ADD_INTENSITY;
+        uint16_t ring;
+        double timestamp;
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    } EIGEN_ALIGN16;
+}
+POINT_CLOUD_REGISTER_POINT_STRUCT (
+        robosenseM1_ros::Point,
+        (float, x, x)
+        (float, y, y)
+        (float, z, z)
+        (float, intensity, intensity)
+        (uint16_t, ring, ring)
+        (double, timestamp, timestamp)
+)
+
 class Preprocess
 {
   public:
@@ -93,8 +112,9 @@ class Preprocess
   ~Preprocess();
   
   void process(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
-  void process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
-  void set(bool feat_en, int lid_type, double bld, int pfilt_num);
+  void process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out,
+                int i_sub_cloud, int num_sub_cloud, double &start_time, double &end_time);
+  void set(bool feat_en, int lid_type, double bld, int pfilt_num, double det_range = 100.0, double max_z = 5.0, bool divide_sub_cloud = false);
 
   // sensor_msgs::msg::PointCloud2::ConstSharedPtr pointcloud;
   PointCloudXYZI pl_full, pl_corn, pl_surf;
@@ -102,12 +122,14 @@ class Preprocess
   vector<orgtype> typess[128]; //maximum 128 line lidar
   float time_unit_scale;
   int lidar_type, point_filter_num, N_SCANS, SCAN_RATE, time_unit;
-  double blind;
-  bool feature_enabled, given_offset_time;
+  double blind, det_range, max_height;
+  bool feature_enabled, given_offset_time, divide_sub_cloud{false};
 
   private:
   void avia_handler(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg);
   void oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+  void robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, int i_sub_cloud, int num_sub_cloud, double & start_time, double & end_time);
+  void robosenseAiry_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, int i_sub_cloud, int num_sub_cloud, double & start_time, double & end_time);
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void sim_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);

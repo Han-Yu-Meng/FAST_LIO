@@ -1,10 +1,11 @@
 #include "preprocess.h"
+#include <pcl/filters/approximate_voxel_grid.h>
 
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
 
 Preprocess::Preprocess(fins::Node* fins_node_)
-  :fins_node(fins_node_), feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+  :fins_node(fins_node_), feature_enabled(0), lidar_type(AVIA), blind(0.01), det_range(100.0), max_height(5.0), point_filter_num(1)
 {
   inf_bound = 10;
   N_SCANS   = 6;
@@ -33,12 +34,15 @@ Preprocess::Preprocess(fins::Node* fins_node_)
 
 Preprocess::~Preprocess() {}
 
-void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
+void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num, double det_range_, double max_z, bool divide_sub_cloud_)
 {
   feature_enabled = feat_en;
   lidar_type = lid_type;
   blind = bld;
   point_filter_num = pfilt_num;
+  det_range = det_range_;
+  max_height = max_z;
+  divide_sub_cloud = divide_sub_cloud_;
 }
 
 void Preprocess::process(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
@@ -47,7 +51,8 @@ void Preprocess::process(const livox_driver2::msg::CustomMsg::ConstSharedPtr &ms
   *pcl_out = pl_surf;
 }
 
-void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
+void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out,
+                         int i_sub_cloud, int num_sub_cloud, double &start_time, double &end_time)
 {
   switch (time_unit)
   {
@@ -80,6 +85,14 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &ms
 
   case MARSIM:
     sim_handler(msg);
+    break;
+
+  case RSM1:
+    robosenseM1_handler(msg, i_sub_cloud, num_sub_cloud, start_time, end_time);
+    break;
+
+  case RSAIRY:
+    robosenseAiry_handler(msg, i_sub_cloud, num_sub_cloud, start_time, end_time);
     break;
   
   default:
@@ -274,6 +287,161 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::ConstShared
       pl_surf.points.push_back(added_pt);
     }
   }
+}
+
+void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg,
+                                     int i_sub_cloud, int num_sub_cloud, double & start_time, double & end_time)
+{
+    pl_surf.clear();
+    pl_corn.clear();
+    pl_full.clear();
+    pcl::PointCloud<robosenseM1_ros::Point> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+    int plsize = pl_orig.size();
+    pl_corn.reserve(plsize);
+    pl_surf.reserve(plsize);
+    if (feature_enabled)
+    {
+        for (int i = 0; i < N_SCANS; i++)
+        {
+            pl_buff[i].clear();
+            pl_buff[i].reserve(plsize);
+        }
+        int num_point_each_sub_cloud = plsize/pl_orig.width/num_sub_cloud;
+        for(int i_ori_width = 0; i_ori_width < (int)pl_orig.width; i_ori_width ++){
+            for(int i_ori_height = num_point_each_sub_cloud * i_sub_cloud;
+                    i_ori_height < num_point_each_sub_cloud * (i_sub_cloud+1); i_ori_height ++) {
+
+                robosenseM1_ros::Point & ori_point = pl_orig.at(i_ori_width, i_ori_height);
+                if(i_ori_height == num_point_each_sub_cloud * i_sub_cloud){
+                    start_time = ori_point.timestamp;
+                }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){
+                    end_time = ori_point.timestamp;
+                }
+                if (i_ori_height % point_filter_num != 0) {continue;}
+
+                double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
+                bool height_valid = ori_point.z < max_height && ori_point.z > 0;
+                if(range < det_range && range > blind && height_valid){
+                    PointType added_pt;
+                    added_pt.x = ori_point.x;
+                    added_pt.y = ori_point.y;
+                    added_pt.z = ori_point.z;
+                    added_pt.intensity = ori_point.intensity;
+                    added_pt.normal_x = 0;
+                    added_pt.normal_y = 0;
+                    added_pt.normal_z = 0;
+                    added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale; 
+                    if(i_ori_width < N_SCANS){
+                        pl_buff[i_ori_width].push_back(added_pt);
+                    }
+                }
+            }
+        }
+        for (int j = 0; j < N_SCANS; j++)
+        {
+            PointCloudXYZI &pl = pl_buff[j];
+            int linesize = pl.size();
+            vector<orgtype> &types = typess[j];
+            types.clear();
+            types.resize(linesize);
+            linesize--;
+            for (uint i = 0; i < (uint)linesize; i++)
+            {
+                types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
+                vx = pl[i].x - pl[i + 1].x;
+                vy = pl[i].y - pl[i + 1].y;
+                vz = pl[i].z - pl[i + 1].z;
+                types[i].dista = vx * vx + vy * vy + vz * vz;
+            }
+            types[linesize].range = sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
+            give_feature(pl, types);
+        }
+    }
+    else
+    {
+        int num_point_each_sub_cloud = plsize/pl_orig.width/num_sub_cloud;
+        for(int i_ori_width = 0; i_ori_width < (int)pl_orig.width; i_ori_width ++){
+            for(int i_ori_height = num_point_each_sub_cloud * i_sub_cloud;
+                    i_ori_height < num_point_each_sub_cloud * (i_sub_cloud+1); i_ori_height ++) {
+
+                robosenseM1_ros::Point & ori_point = pl_orig.at(i_ori_width, i_ori_height);
+                if(i_ori_height == num_point_each_sub_cloud * i_sub_cloud){
+                    start_time = ori_point.timestamp;
+                }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){
+                    end_time = ori_point.timestamp;
+                }
+                if (i_ori_height % point_filter_num != 0) {continue;}
+
+                double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
+                bool height_valid = ori_point.z < max_height && ori_point.z > 0;
+                if(range < det_range && range > blind && height_valid){
+                    PointType added_pt;
+                    added_pt.x = ori_point.x;
+                    added_pt.y = ori_point.y;
+                    added_pt.z = ori_point.z;
+                    added_pt.intensity = ori_point.intensity;
+                    added_pt.normal_x = 0;
+                    added_pt.normal_y = 0;
+                    added_pt.normal_z = 0;
+                    added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale;
+                    pl_surf.points.push_back(added_pt);
+                }
+            }
+        }
+        fins_node->logger->info("Robosense M1 point size after downsample: {}", pl_surf.size());
+    }
+}
+
+void Preprocess::robosenseAiry_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
+                                       int i_sub_cloud, int num_sub_cloud, 
+                                       double &start_time, double &end_time)
+{
+    if (msg->fields.size() >= 6){
+      robosenseM1_handler(msg, i_sub_cloud, num_sub_cloud, start_time, end_time);
+      return;
+    }
+    
+    pl_surf.clear();
+    pl_corn.clear();
+    pl_full.clear();
+    
+    pcl::PointCloud<pcl::PointXYZI>::Ptr pl_orig(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::fromROSMsg(*msg, *pl_orig);
+    
+    if (pl_orig->points.empty()) return;
+
+    start_time = get_time_sec(msg->header.stamp);
+    end_time = start_time;
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr pl_downsampled(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::ApproximateVoxelGrid<pcl::PointXYZI> voxel_filter;
+    voxel_filter.setInputCloud(pl_orig);
+    voxel_filter.setLeafSize(0.1f, 0.1f, 0.1f); 
+    voxel_filter.filter(*pl_downsampled);
+
+    for (const auto& ori_point : pl_downsampled->points)
+    {
+        double range = sqrt(ori_point.x * ori_point.x + 
+                            ori_point.y * ori_point.y + 
+                            ori_point.z * ori_point.z);
+                            
+        bool height_valid = ori_point.z < max_height && ori_point.z > 0;
+        if(range < det_range && range > blind && height_valid)
+        {
+            PointType added_pt;
+            added_pt.x = ori_point.x;
+            added_pt.y = ori_point.y;
+            added_pt.z = ori_point.z;
+            added_pt.intensity = ori_point.intensity;
+            added_pt.normal_x = 0;
+            added_pt.normal_y = 0;
+            added_pt.normal_z = 0;
+            added_pt.curvature = 0.0; 
+
+            pl_surf.points.push_back(added_pt);
+        }
+    }
 }
 
 void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)

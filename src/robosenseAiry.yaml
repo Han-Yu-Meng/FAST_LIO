@@ -1,0 +1,57 @@
+common:
+    lid_topic:  "/rslidar_points"
+    imu_topic:  "/rslidar_imu_data" # /mavros/imu/data /ouster/imu /imu/data
+    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+    time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
+                                  # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+    deskew_en: true            # true: perform motion compensation for each point; false: skip motion compensation and directly use the input point cloud 
+                               # (assumed to be captured in a flash way, i.e., all points have the same timestamp)
+    # IMPORTANT: if using XYRI, set deskew to false (can deskew only if message type is XYZIRT)
+preprocess:
+    lidar_type: 5                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR,
+                                 # 4 for Robosense M1 and 5 for Robosense Airy (supports both XYZI and XYZIRT).
+    # IMPORTANT: 4 can work with RS Airy but ONLY IF message type is XYZIRT (change it in CMakeLists.txt in rslidar_sdk)
+    # RS Airy handler actually calls RS M1 handler if message type is XYZIRT. 
+    # If message type is XYZI, it will use voxel downsampling (RS Airy handler).
+    scan_line: 96
+    timestamp_unit: 0                 # 0-second, 1-milisecond, 2-microsecond, 3-nanosecond.
+    blind: 0.1
+
+mapping:
+    max_search_dist_surf: 1.0 # default: 5
+    divide_sub_cloud: false       # true: divide the point cloud into several sub-clouds according to the scan line ID, and process them separately; 
+                                  # false: process the whole point cloud together.
+    # Supported for Lidar type 4 (RSM1), and for type 5 (RSAIRY) only if message type is XYZIRT. 
+    num_sub_cloud: 1
+    point_filter_num: 1         # 0: no filter; 1: keep all points; 2: keep 1/2 points; 3: keep 1/3 points, and so on.
+    acc_cov: 0.05
+    gyr_cov: 0.05
+    b_acc_cov: 0.0002
+    b_gyr_cov: 0.0002
+
+    # Tuned parameters (should be inflated). Above parameters worked better
+    # # TAKE THE SQUARE OF NOISE PARAMETERS PROVIDED BY imu_utils. Use SI units (m/s^2 for acceleration, rad/s for angular velocity) for noise parameters.
+    # acc_cov: 4.8416471004107629e-05
+    # gyr_cov: 1.5404300896170346e-06
+    # b_acc_cov: 1.7326989557807598e-08
+    # b_gyr_cov: 3.9576754011393061e-10
+
+    fov_degree:    360
+    det_range:     10.0
+    max_height:    2.5
+    extrinsic_est_en:  false      # true: enable the online estimation of IMU-LiDAR extrinsic
+    extrinsic_T: [0.004250, 0.004180, -0.004460]
+    extrinsic_R: [0.0033883,  -0.99997669,  0.00592802,
+                 -0.99999315, -0.00339705, -0.00146638,
+                  0.00148648, -0.00592301, -0.99998135]
+
+publish:
+    path_en:  true
+    scan_publish_en:  true       # false: close all the point cloud output
+    dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
+    scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+
+pcd_save:
+    pcd_save_en: true
+    interval: -1                 # how many LiDAR frames saved in each pcd file;
+                                 # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.

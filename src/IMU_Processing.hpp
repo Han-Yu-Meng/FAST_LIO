@@ -56,6 +56,7 @@ class ImuProcess
   V3D cov_bias_acc;
   double first_lidar_time;
   int lidar_type;
+  bool deskew_en{true};
 
   bool imu_need_init() { return imu_need_init_; }
   V3D get_mean_acc() { return mean_acc; }
@@ -84,7 +85,7 @@ class ImuProcess
 };
 
 ImuProcess::ImuProcess(fins::Node* fins_node_)
-    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), fins_node(fins_node_)
+    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), fins_node(fins_node_), deskew_en(true)
 {
   init_iter_num = 1;
   Q = process_noise_cov();
@@ -228,7 +229,10 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     /*** sort point clouds by offset time ***/
   pcl_out = *(meas.lidar);
-  sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
+  if (deskew_en)
+  {
+    sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
+  }
 
   /*** Initialize IMU pose ***/
   state_ikfom imu_state = kf_state.get_x();
@@ -297,6 +301,8 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   last_lidar_end_time_ = pcl_end_time;
 
   /*** undistort each lidar point (backward propagation) ***/
+  if (!deskew_en) return;
+
   if (pcl_out.points.begin() == pcl_out.points.end()) return;
 
   if(lidar_type != MARSIM){

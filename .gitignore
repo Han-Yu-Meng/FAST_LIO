@@ -7,3 +7,6 @@ Log/*.pdf
 .vscode/settings.json
 PCD/*.pcd
 git_diff*
+*_airy.hpp
+*_airy.cpp
+*_airy.h

@@ -80,6 +80,7 @@ double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
+double max_search_dist_surf = 5.0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double imu_time_tolerance = 0.01;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
@@ -89,6 +90,10 @@ bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, scan_body_pub_en = false, time_sync_en = false;
 bool extrinsic_est_en = false;
 int lidar_type;
+int num_sub_cloud = 1;
+bool deskew_en = true;
+bool msg_is_XYZI = true;
+bool msg_is_XYZIRT = false;
 bool use_imu_odometry_ = true;
 int imu_window_size = 200;
 std::deque<Eigen::Vector3d> imu_ang_vel_window_;
@@ -263,6 +268,26 @@ void lasermap_fov_segment()
 public:
 void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, fins::AcqTime t) 
 {
+    // Check LiDAR message type (XYZI or XYZIRT) and print info (only for the first received message)
+    static bool fields_checked = false;
+    if (!fields_checked)
+    {
+        if (msg->fields.size() == 4){
+            msg_is_XYZI = true;
+            fins_node->logger->info("LiDAR message type: XYZI, with {} points", msg->width * msg->height);
+        }
+        else if (msg->fields.size() >= 6){
+            msg_is_XYZIRT = true;
+            fins_node->logger->info("LiDAR message type: XYZIRT, with {} points", msg->width * msg->height);
+        }
+        else
+        {
+            fins_node->logger->error("Unsupported LiDAR message type, only XYZI and XYZIRT supported");
+            return;
+        }
+        fields_checked = true;
+    }
+
     mtx_buffer.lock();
     scan_count ++;
     // fins_node->logger->info("Received standard lidar point cloud with timestamp {}, points {}", get_time_sec(msg->header.stamp), msg->width * msg->height);
@@ -273,15 +298,33 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
         acq_time_buffer.clear();
     }
 
-    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-    p_pre->process(msg, ptr);
-    publish_raw_body(ptr, t);
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(get_time_sec(msg->header.stamp));
-    acq_time_buffer.push_back(t);
-    last_timestamp_lidar = get_time_sec(msg->header.stamp);
+    if(p_pre->divide_sub_cloud && 
+        (p_pre->lidar_type == RSM1 || (p_pre->lidar_type == RSAIRY && msg_is_XYZIRT)) ) // divide into subclouds only support RSM1 and RSAIRY with XYZIRT message type
+    {
+        double start_time, end_time;
+        for(int i_sub_cloud = 0; i_sub_cloud < num_sub_cloud; i_sub_cloud ++){
+            PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+            p_pre->process(msg, ptr, i_sub_cloud, num_sub_cloud, start_time, end_time);
+            lidar_buffer.push_back(ptr);
+            time_buffer.push_back(start_time);
+            acq_time_buffer.push_back(t);
+            last_timestamp_lidar = start_time;
+            sig_buffer.notify_all();
+        }
+        lidar_end_time = end_time;
+    }
+    else{
+        PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+        double start_time, end_time;
+        p_pre->process(msg, ptr, 0, 1, start_time, end_time);
+        publish_raw_body(ptr, t);
+        lidar_buffer.push_back(ptr);
+        time_buffer.push_back(get_time_sec(msg->header.stamp));
+        acq_time_buffer.push_back(t);
+        last_timestamp_lidar = get_time_sec(msg->header.stamp);
+        sig_buffer.notify_all();
+    }
     mtx_buffer.unlock();
-    sig_buffer.notify_all();
 }
 
 double timediff_lidar_wrt_imu = 0.0;
@@ -357,14 +400,19 @@ void process_and_publish_imu_odometry(
     // Remove bias from angular velocity for odometry output
     smoothed_ang_vel -= imu_state.bg;
 
-    // Transform imu_state.pos and imu_state.rot to base_link_frame
-    // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
-    M3D R_L_I = imu_state.offset_R_L_I.toRotationMatrix();
-    M3D R_I_W = imu_state.rot.toRotationMatrix();
-    M3D R_base_inv = base_R_lidar.transpose();
+    // T_odom_base = (T_IMU_base_init)^-1 * T_odom_IMU * T_IMU_base
+    M3D R_LI = imu_state.offset_R_L_I.toRotationMatrix();
+    V3D T_LI = imu_state.offset_T_L_I;
+    M3D R_BL = base_R_lidar;
+    V3D T_BL = base_T_lidar;
 
-    M3D R_odom_base = base_R_lidar * R_I_W * R_L_I * R_base_inv;
-    V3D t_odom_base = base_R_lidar * (R_I_W * (R_L_I * (-R_base_inv * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos) + base_T_lidar;
+    M3D R_IB = R_LI * R_BL.transpose();
+    V3D T_IB = R_LI * (-R_BL.transpose() * T_BL) + T_LI;
+    M3D R_BI = R_IB.transpose();
+    V3D T_BI = -R_IB.transpose() * T_IB;
+
+    M3D R_odom_base = R_BI * imu_state.rot.toRotationMatrix() * R_IB;
+    V3D t_odom_base = R_BI * (imu_state.rot.toRotationMatrix() * T_IB + imu_state.pos) + T_BI;
     Eigen::Quaterniond q_base(R_odom_base);
 
     nav_msgs::msg::Odometry imu_odometry;
@@ -384,19 +432,17 @@ void process_and_publish_imu_odometry(
     vect3 vel_imu_in_IMU = imu_state.rot.conjugate() * imu_state.vel; // vel_imu
 
     // 刚体速度修正：v_base = v_imu + omega_IMU × (p_base - p_imu)，均在 IMU 体系下
-    V3D t_base_in_IMU = imu_state.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar)
-                        + imu_state.offset_T_L_I;
+    V3D t_base_in_IMU = T_IB;
     vect3 vel_base_in_IMU = vel_imu_in_IMU + smoothed_ang_vel.cross(t_base_in_IMU);
 
     // 再从 IMU 体系旋转到 base_link 体系
-    M3D R_L_I_T = R_L_I.transpose();
-    vect3 vel_base = base_R_lidar * R_L_I_T * vel_base_in_IMU; 
+    vect3 vel_base = R_BI * vel_base_in_IMU; 
     imu_odometry.twist.twist.linear.x = vel_base(0);
     imu_odometry.twist.twist.linear.y = vel_base(1);
     imu_odometry.twist.twist.linear.z = vel_base(2);
 
     // 角速度转到 base_link_frame
-    vect3 ang_vel_base = base_R_lidar * R_L_I_T * smoothed_ang_vel;
+    vect3 ang_vel_base = R_BI * smoothed_ang_vel;
     imu_odometry.twist.twist.angular.x = ang_vel_base(0);
     imu_odometry.twist.twist.angular.y = ang_vel_base(1);
     imu_odometry.twist.twist.angular.z = ang_vel_base(2);
@@ -411,6 +457,16 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
     publish_count ++;
 
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+
+    // FIRST, CHANGE IMU FRAME TO FLU IF NED IS USED (RSAIRY)
+    if (p_pre->lidar_type == RSAIRY)
+    {
+        msg->angular_velocity.y *= -1.0;
+        msg->angular_velocity.z *= -1.0;
+        
+        msg->linear_acceleration.y *= -1.0;
+        msg->linear_acceleration.z *= -1.0;
+    }
 
     msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
@@ -472,24 +528,38 @@ bool sync_packages(MeasureGroup &meas)
     if(!lidar_pushed)
     {
         meas.lidar = lidar_buffer.front();
-        meas.lidar_beg_time = time_buffer.front();
         meas.acq_time = acq_time_buffer.front();
 
-
-        if (meas.lidar->points.size() <= 1) // time too little
+        // for flash lidar with 4 fields (XYZI), the timestamp is the same for all points, so we can directly use the header time as both start and end time of the scan. 
+        // For other lidars, we need to calculate the start time based on the curvature field of the last point, which records the time offset of that point relative to the scan start time.
+        if (p_pre->lidar_type == RSAIRY && msg_is_XYZI)
         {
-            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
-            fins_node->logger->warn("Too few input point cloud!");
-        }
-        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
-        {
-            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
+            // Flash lidar capture is instantaneous. Start and end times are identical.
+            meas.lidar_beg_time = time_buffer.front();
+            lidar_end_time = meas.lidar_beg_time; 
         }
         else
         {
-            scan_num ++;
-            lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
-            lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
+            if(p_pre->lidar_type == RSM1){
+                meas.lidar_beg_time = time_buffer.front() - meas.lidar->points.back().curvature / double(1000);
+            }else{
+                meas.lidar_beg_time = time_buffer.front();
+            }
+            if (meas.lidar->points.size() <= 1) // time too little
+            {
+                lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
+                fins_node->logger->warn("Too few input point cloud!");
+            }
+            else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+            {
+                lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
+            }
+            else
+            {
+                scan_num ++;
+                lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
+                lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
+            }
         }
         if(lidar_type == MARSIM)
             lidar_end_time = meas.lidar_beg_time;
@@ -578,10 +648,24 @@ void publish_frame_world(const fins::AcqTime &acq_time)
         
         pcl::PointCloud<pcl::PointXYZI>::Ptr laserCloudWorld(new pcl::PointCloud<pcl::PointXYZI>(size, 1));
 
-        M3D R_L_I = state_point.offset_R_L_I.toRotationMatrix();
-        M3D R_I_W = state_point.rot.toRotationMatrix();
-        M3D R_odom_lidar = base_R_lidar * R_I_W * R_L_I;
-        V3D t_odom_lidar = base_R_lidar * (R_I_W * state_point.offset_T_L_I + state_point.pos) + base_T_lidar;
+        M3D R_LI = state_point.offset_R_L_I.toRotationMatrix();
+        V3D T_LI = state_point.offset_T_L_I;
+        M3D R_BL = base_R_lidar;
+        V3D T_BL = base_T_lidar;
+
+        // T_IMU_base = T_IMU_LiDAR * T_LiDAR_base
+        M3D R_IB = R_LI * R_BL.transpose();
+        V3D T_IB = R_LI * (-R_BL.transpose() * T_BL) + T_LI;
+        M3D R_BI = R_IB.transpose();
+        V3D T_BI = -R_IB.transpose() * T_IB;
+
+        // T_odom_lidar = T_odom_base * T_base_lidar
+        // T_odom_base = R_BI * state_point.rot * R_IB, R_BI * (state_point.rot * T_IB + state_point.pos) + T_BI
+        M3D R_odom_base = R_BI * state_point.rot.toRotationMatrix() * R_IB;
+        V3D t_odom_base = R_BI * (state_point.rot.toRotationMatrix() * T_IB + state_point.pos) + T_BI;
+        
+        M3D R_odom_lidar = R_odom_base * R_BL;
+        V3D t_odom_lidar = R_odom_base * T_BL + t_odom_base;
 
         // #pragma omp parallel for schedule(dynamic, 512)
         for (int i = 0; i < size; i++)
@@ -668,9 +752,24 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
         odomAftMapped.header.stamp = fins::to_ros_msg_time(acq_time);
 
         // Transform state_point.pos and state_point.rot to base_link_frame
-        // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
-        M3D R_odom_base = base_R_lidar * state_point.rot.toRotationMatrix() * state_point.offset_R_L_I.toRotationMatrix() * base_R_lidar.transpose();
-        V3D t_odom_base = base_R_lidar * (state_point.rot.toRotationMatrix() * (state_point.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar) + state_point.offset_T_L_I) + state_point.pos) + base_T_lidar;
+        // Correct T_odom_base = T_base_init_IMU_init * T_odom_IMU * T_IMU_base
+        M3D R_LI = state_point.offset_R_L_I.toRotationMatrix();
+        V3D T_LI = state_point.offset_T_L_I;
+        M3D R_BL = base_R_lidar;
+        V3D T_BL = base_T_lidar;
+
+        // T_IMU_base = T_IMU_LiDAR * T_LiDAR_base
+        M3D R_IB = R_LI * R_BL.transpose();
+        V3D T_IB = R_LI * (-R_BL.transpose() * T_BL) + T_LI;
+
+        // T_odom_base = (T_IMU_base_init)^-1 * T_odom_IMU * T_IMU_base
+        // Note: We assume T_IMU_base is constant. 
+        // To make base_link start at identity, we use:
+        M3D R_BI = R_IB.transpose();
+        V3D T_BI = -R_IB.transpose() * T_IB;
+
+        M3D R_odom_base = R_BI * state_point.rot.toRotationMatrix() * R_IB;
+        V3D t_odom_base = R_BI * (state_point.rot.toRotationMatrix() * T_IB + state_point.pos) + T_BI;
         Eigen::Quaterniond q_base(R_odom_base);
 
         odomAftMapped.pose.pose.position.x = t_odom_base(0);
@@ -699,20 +798,19 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
         vect3 omega_IMU = state_point.rot.toRotationMatrix().transpose() * ang_vel_world;
 
         // 刚体速度修正：v_base = v_imu + omega_IMU × (p_base - p_imu)，均在 IMU 体系下
-        // p_base 在 IMU 体系中的位置：先从 base 转到 lidar，再从 lidar 转到 IMU
-        V3D t_base_in_IMU = state_point.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar)
-                            + state_point.offset_T_L_I;
+        // p_base 在 IMU 体系中的位置：T_IB.translation()
+        V3D t_base_in_IMU = T_IB;
         vect3 vel_base_in_IMU = vel_imu_in_IMU + omega_IMU.cross(t_base_in_IMU);
 
-        // 再从 IMU 体系旋转到 base_link 体系：R_base_IMU = base_R_lidar * R_LI^T
-        vect3 vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * vel_base_in_IMU;
+        // 再从 IMU 体系旋转到 base_link 体系：R_base_IMU = R_BI
+        vect3 vel_base = R_BI * vel_base_in_IMU;
 
         odomAftMapped.twist.twist.linear.x = vel_base(0);
         odomAftMapped.twist.twist.linear.y = vel_base(1);
         odomAftMapped.twist.twist.linear.z = vel_base(2);
 
-        // 角速度从 IMU 体系转到 base_link_frame：R_BI = R_BL * R_LI^T
-        vect3 ang_vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * omega_IMU;
+        // 角速度从 IMU 体系转到 base_link_frame：R_BI
+        vect3 ang_vel_base = R_BI * omega_IMU;
 
         odomAftMapped.twist.twist.angular.x = ang_vel_base(0);
         odomAftMapped.twist.twist.angular.y = ang_vel_base(1);
@@ -784,7 +882,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         {
             /** Find the closest surfaces in the map **/
             ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
-            point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
+            point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > max_search_dist_surf ? false : true;
         }
 
         if (!point_selected_surf[i]) continue;
@@ -945,9 +1043,10 @@ void initialize() {
                              .greater_than(0.0);
 
     p_pre->lidar_type = preprocess.get<int>("lidar_type", AVIA)
-                             .with_description("AVIA = 1, VELO16 = 2, OUST64 = 3, MARSIM = 4")
-                             .one_of({LID_TYPE::AVIA, LID_TYPE::VELO16, LID_TYPE::OUST64, LID_TYPE::MARSIM});
+                             .with_description("AVIA = 1, VELO16 = 2, OUST64 = 3, MARSIM = 4, RSM1 = 5, RSAIRY = 6")
+                             .one_of({LID_TYPE::AVIA, LID_TYPE::VELO16, LID_TYPE::OUST64, LID_TYPE::MARSIM, LID_TYPE::RSM1, LID_TYPE::RSAIRY});
     lidar_type = p_pre->lidar_type;
+    p_imu->lidar_type = lidar_type;
 
     p_pre->N_SCANS = preprocess.get("scan_line", 16)
                                .with_description("scan line")
@@ -968,6 +1067,25 @@ void initialize() {
                                .with_description("point filter number")
                                .greater_than(0);
 
+    p_pre->det_range = preprocess.get("det_range", 100.0)
+                               .with_description("lidar detection range")
+                               .greater_than(0.0);
+    
+    p_pre->max_height = preprocess.get("max_height", 5.0)
+                               .with_description("lidar max height")
+                               .greater_than(0.0);
+
+    p_pre->divide_sub_cloud = preprocess.get("divide_sub_cloud", false)
+                               .with_description("divide point cloud into sub-clouds");
+
+    num_sub_cloud = preprocess.get("num_sub_cloud", 1)
+                               .with_description("number of sub-clouds")
+                               .greater_than(0);
+    
+    deskew_en = preprocess.get("deskew_en", true)
+                               .with_description("enable deskewing");
+    p_imu->deskew_en = deskew_en;
+
     fins::ParamLoader mapping("FastLIO.mapping");
     acc_cov = mapping.get("acc_cov", 0.1)
                .with_description("acceleration covariance")
@@ -987,6 +1105,10 @@ void initialize() {
     DET_RANGE = mapping.get("det_range", 300.0f)
                .with_description("detection range")
                .greater_than(0.0f);
+    
+    max_search_dist_surf = mapping.get("max_search_dist_surf", 5.0)
+                                  .with_description("max search distance for surface")
+                                  .greater_than(0.0);
 
     extrinsic_est_en = mapping.get("extrinsic_est_en", false)
                               .with_description("enable extrinsic estimation");
@@ -1000,6 +1122,21 @@ void initialize() {
 
     Lidar_T_wrt_IMU << VEC_FROM_ARRAY(extrinT);
     Lidar_R_wrt_IMU << MAT_FROM_ARRAY(extrinR);
+
+    // for RSAIRY, the lidar frame is NED, need to change to FLU for the IEKF to work properly
+    if (lidar_type == RSAIRY)
+    {
+        M3D NED_to_FLU;
+        NED_to_FLU << 1,  0,  0,
+                    0, -1,  0,
+                    0,  0, -1;
+                    
+        // Left-multiply to transform the output into the FLU frame
+        Lidar_R_wrt_IMU = NED_to_FLU * Lidar_R_wrt_IMU; 
+        
+        // Apply the same transformation to the translation vector
+        Lidar_T_wrt_IMU = NED_to_FLU * Lidar_T_wrt_IMU; 
+    }
 
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
     p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));

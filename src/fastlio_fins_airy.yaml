@@ -1,0 +1,41 @@
+FastLIO:
+  max_iteration: 4 # max iteration
+  filter_size_surf: 0.2 # filter size of surface
+  filter_size_map: 0.2 # filter size of map
+  cube_side_length: 200 # cube side length
+  common:
+    initial_frame: "odom" # initial frame
+    base_link_frame: "base_link" # base link frame
+    base_lidar_frame: "base_lidar" # lidar frame
+    time_sync_en: false # enable time synchronization
+    time_offset_lidar_to_imu: 0 # time offset between lidar and imu
+    use_imu_odometry: false # use imu odometry
+    imu_window_size: 10 # imu window size
+    imu_time_tolerance: 0 # imu time tolerance
+  preprocess:
+    blind: 0.1 # blind radius
+    lidar_type: 6 # AVIA = 1, VELO16 = 2, OUST64 = 3, MARSIM = 4, RSM1 = 5, RSAIRY = 6
+    scan_line: 96 # scan line
+    timestamp_unit: 0 # SEC = 0, MS = 1, US = 2, NS = 3
+    scan_rate: 10 # scan rate
+    
+    feature_extract_enable: false # enable feature extraction
+    point_filter_num: 1 # point filter number
+    det_range: 10.0 # lidar detection range
+    max_height: 2.5 # lidar max height
+    divide_sub_cloud: false # divide point cloud into sub-clouds
+    num_sub_cloud: 1 # number of sub-clouds
+    deskew_en: false # enable deskewing
+    
+  mapping:
+    acc_cov: 0.05 # acceleration covariance
+    gyr_cov: 0.05 # gyroscope covariance
+    b_acc_cov: 0.0002 # acceleration bias covariance
+    b_gyr_cov: 0.0002 # gyroscope bias covariance
+    fov_degree: 360 # FOV degree
+    det_range: 10.0 # detection range
+    extrinsic_est_en: false # enable extrinsic estimation
+    extrinsic_T: [0.004250, 0.004180, -0.004460] # extrinsic translation
+    extrinsic_R: [0.0033883,  -0.99997669,  0.00592802,
+                 -0.99999315, -0.00339705, -0.00146638,
+                  0.00148648, -0.00592301, -0.99998135] # 从驱动里面读取
