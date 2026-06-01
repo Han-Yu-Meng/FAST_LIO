@@ -324,6 +324,14 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
         last_timestamp_lidar = get_time_sec(msg->header.stamp);
         sig_buffer.notify_all();
     }
+
+    if (lidar_buffer.size() > 5) {
+        lidar_buffer.pop_front();
+        time_buffer.pop_front();
+        acq_time_buffer.pop_front();
+        fins_node->logger->warn("Lidar buffer overflow, dropping oldest frame!");
+    }
+
     mtx_buffer.unlock();
 }
 
@@ -681,6 +689,8 @@ void publish_frame_world(const fins::AcqTime &acq_time)
         
         laserCloudWorld->header.frame_id = initial_frame;
         laserCloudWorld->header.stamp = fins::to_microseconds(acq_time);
+
+        fins_node->logger->debug("cloud_registered [Points: {}]", size);
         
         fins_node->send("cloud", laserCloudWorld, acq_time);
     }
@@ -927,6 +937,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     }
 
     res_mean_last = total_residual / effct_feat_num;
+
+    fins_node->logger->debug("residual mean: {:.3f}", res_mean_last);
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
     ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
@@ -1273,8 +1285,16 @@ void loop_once() {
         total_frame++;
         total_time += t_total;
         if (total_frame % 10 == 0) {
-            fins_node->logger->info("FAST_LIO Statistics: [Points: {}] [Update: {:.3f}ms] [Incremental: {:.3f}ms] [Total: {:.3f}ms] [Avg Total: {:.3f}ms]", 
+            fins_node->logger->info("FAST_LIO [Points: {}] [Update: {:.3f}ms] [Incremental: {:.3f}ms] [Total: {:.3f}ms] [Avg Total: {:.3f}ms]", 
                 feats_down_size, (t_update_end - t_update_start) * 1000.0, (t_incre_end - t_incre_start) * 1000.0, t_total * 1000.0, (total_time / total_frame) * 1000.0);
+            
+            if (extrinsic_est_en) {
+                V3D euler_L_I = SO3ToEuler(state_point.offset_R_L_I);
+                fins_node->logger->info("Estimated Extrinsic R_L_I Euler [r, p, y]: {:.4f} {:.4f} {:.4f}", 
+                    euler_L_I(0) * 57.29578, euler_L_I(1) * 57.29578, euler_L_I(2) * 57.29578);
+                fins_node->logger->info("Estimated Extrinsic T_L_I: [{:.4f}, {:.4f}, {:.4f}]", 
+                    state_point.offset_T_L_I(0), state_point.offset_T_L_I(1), state_point.offset_T_L_I(2));
+            }
         }
     }
 }
