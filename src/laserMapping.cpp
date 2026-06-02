@@ -288,51 +288,53 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
         fields_checked = true;
     }
 
-    mtx_buffer.lock();
-    scan_count ++;
-    // fins_node->logger->info("Received standard lidar point cloud with timestamp {}, points {}", get_time_sec(msg->header.stamp), msg->width * msg->height);
-    if (get_time_sec(msg->header.stamp) < last_timestamp_lidar)
-    {
-        fins_node->logger->error("lidar loop back, clear buffer");
-        lidar_buffer.clear();
-        acq_time_buffer.clear();
-    }
-
     if(p_pre->divide_sub_cloud && 
         (p_pre->lidar_type == RSM1 || (p_pre->lidar_type == RSAIRY && msg_is_XYZIRT)) ) // divide into subclouds only support RSM1 and RSAIRY with XYZIRT message type
     {
-        double start_time, end_time;
         for(int i_sub_cloud = 0; i_sub_cloud < num_sub_cloud; i_sub_cloud ++){
             PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+            double start_time, end_time;
             p_pre->process(msg, ptr, i_sub_cloud, num_sub_cloud, start_time, end_time);
+            
+            mtx_buffer.lock();
             lidar_buffer.push_back(ptr);
             time_buffer.push_back(start_time);
             acq_time_buffer.push_back(t);
             last_timestamp_lidar = start_time;
+            
+            if (lidar_buffer.size() > 10) {
+                lidar_buffer.pop_front();
+                time_buffer.pop_front();
+                acq_time_buffer.pop_front();
+                lidar_pushed = false; 
+                fins_node->logger->warn("Lidar buffer overflow, dropping oldest frame!");
+            }
+            mtx_buffer.unlock();
             sig_buffer.notify_all();
         }
-        lidar_end_time = end_time;
     }
     else{
         PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
         double start_time, end_time;
         p_pre->process(msg, ptr, 0, 1, start_time, end_time);
         publish_raw_body(ptr, t);
+        
+        mtx_buffer.lock();
         lidar_buffer.push_back(ptr);
         time_buffer.push_back(get_time_sec(msg->header.stamp));
         acq_time_buffer.push_back(t);
         last_timestamp_lidar = get_time_sec(msg->header.stamp);
+        
+        if (lidar_buffer.size() > 10) {
+            lidar_buffer.pop_front();
+            time_buffer.pop_front();
+            acq_time_buffer.pop_front();
+            lidar_pushed = false; 
+            fins_node->logger->warn("Lidar buffer overflow, dropping oldest frame!");
+        }
+        mtx_buffer.unlock();
         sig_buffer.notify_all();
     }
-
-    if (lidar_buffer.size() > 5) {
-        lidar_buffer.pop_front();
-        time_buffer.pop_front();
-        acq_time_buffer.pop_front();
-        fins_node->logger->warn("Lidar buffer overflow, dropping oldest frame!");
-    }
-
-    mtx_buffer.unlock();
 }
 
 double timediff_lidar_wrt_imu = 0.0;
@@ -340,6 +342,10 @@ bool   timediff_set_flg = false;
 
 void livox_pcl_cbk(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, fins::AcqTime t) 
 {
+    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+    p_pre->process(msg, ptr);
+    publish_raw_body(ptr, t);
+
     mtx_buffer.lock();
     scan_count ++;
     if (get_time_sec(msg->header.stamp) < last_timestamp_lidar)
@@ -362,13 +368,18 @@ void livox_pcl_cbk(const livox_driver2::msg::CustomMsg::ConstSharedPtr &msg, fin
         fins_node->logger->info("Self sync IMU and LiDAR, time diff is {}", timediff_lidar_wrt_imu);
     }
 
-    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-    p_pre->process(msg, ptr);
-    publish_raw_body(ptr, t);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
     acq_time_buffer.push_back(t);
     
+    if (lidar_buffer.size() > 10) {
+        lidar_buffer.pop_front();
+        time_buffer.pop_front();
+        acq_time_buffer.pop_front();
+        lidar_pushed = false; 
+        fins_node->logger->warn("Lidar buffer overflow, dropping oldest frame!");
+    }
+
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
@@ -528,6 +539,7 @@ double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
 {
+    unique_lock<mutex> lock(mtx_buffer);
     if (lidar_buffer.empty() || imu_buffer.empty()) {
         return false;
     }
@@ -834,6 +846,7 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
             geometry_msgs::msg::TransformStamped tf;
             tf.header = odomAftMapped.header;
             tf.child_frame_id = odomAftMapped.child_frame_id;
+            fins_node->logger->debug("Publishing TF: {} -> {} at time {:.6f}", tf.header.frame_id, tf.child_frame_id, get_time_sec(tf.header.stamp));
             tf.transform.translation.x = odomAftMapped.pose.pose.position.x;
             tf.transform.translation.y = odomAftMapped.pose.pose.position.y;
             tf.transform.translation.z = odomAftMapped.pose.pose.position.z;
@@ -1176,13 +1189,13 @@ void initialize() {
 }
 
 void loop_once() {
-    if(sync_packages(Measures))  {
+    while(sync_packages(Measures))  {
         if (flg_first_scan)
         {
             first_lidar_time = Measures.lidar_beg_time;
             p_imu->first_lidar_time = first_lidar_time;
             flg_first_scan = false;
-            return ;
+            continue;
         }
         
         double t0;
