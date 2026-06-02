@@ -1,5 +1,7 @@
 #include "preprocess.h"
 #include <pcl/filters/approximate_voxel_grid.h>
+#include <pcl/filters/impl/approximate_voxel_grid.hpp>
+#include <pcl/impl/pcl_base.hpp>
 
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
@@ -361,6 +363,8 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
     else
     {
         int num_point_each_sub_cloud = plsize/pl_orig.width/num_sub_cloud;
+        pcl::PointCloud<robosenseM1_ros::Point>::Ptr pl_sub(new pcl::PointCloud<robosenseM1_ros::Point>());
+        
         for(int i_ori_width = 0; i_ori_width < (int)pl_orig.width; i_ori_width ++){
             for(int i_ori_height = num_point_each_sub_cloud * i_sub_cloud;
                     i_ori_height < num_point_each_sub_cloud * (i_sub_cloud+1); i_ori_height ++) {
@@ -371,25 +375,36 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
                 }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){
                     end_time = ori_point.timestamp;
                 }
+                
                 if (i_ori_height % point_filter_num != 0) {continue;}
-
-                double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
-                bool height_valid = ori_point.z < max_height && ori_point.z > 0;
-                if(range < det_range && range > blind && height_valid){
-                    PointType added_pt;
-                    added_pt.x = ori_point.x;
-                    added_pt.y = ori_point.y;
-                    added_pt.z = ori_point.z;
-                    added_pt.intensity = ori_point.intensity;
-                    added_pt.normal_x = 0;
-                    added_pt.normal_y = 0;
-                    added_pt.normal_z = 0;
-                    added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale;
-                    pl_surf.points.push_back(added_pt);
-                }
+                pl_sub->points.push_back(ori_point);
             }
         }
-        fins_node->logger->info("Robosense M1 point size after downsample: {}", pl_surf.size());
+
+        pcl::PointCloud<robosenseM1_ros::Point>::Ptr pl_downsampled(new pcl::PointCloud<robosenseM1_ros::Point>());
+        pcl::ApproximateVoxelGrid<robosenseM1_ros::Point> voxel_filter;
+        voxel_filter.setInputCloud(pl_sub);
+        voxel_filter.setLeafSize(0.1f, 0.1f, 0.1f); 
+        voxel_filter.filter(*pl_downsampled);
+
+        for (const auto& ori_point : pl_downsampled->points)
+        {
+            double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
+            bool height_valid = ori_point.z < max_height && ori_point.z > 0;
+            if(range < det_range && range > blind && height_valid){
+                PointType added_pt;
+                added_pt.x = ori_point.x;
+                added_pt.y = ori_point.y;
+                added_pt.z = ori_point.z;
+                added_pt.intensity = ori_point.intensity;
+                added_pt.normal_x = 0;
+                added_pt.normal_y = 0;
+                added_pt.normal_z = 0;
+                added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale;
+                pl_surf.points.push_back(added_pt);
+            }
+        }
+        fins_node->logger->debug("Robosense M1 point size after downsample: {}", pl_surf.size());
     }
 }
 
