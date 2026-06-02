@@ -478,14 +478,14 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
     // FIRST, CHANGE IMU FRAME TO FLU IF NED IS USED (RSAIRY)
-    if (p_pre->lidar_type == RSAIRY)
-    {
-        msg->angular_velocity.y *= -1.0;
-        msg->angular_velocity.z *= -1.0;
+    // if (p_pre->lidar_type == RSAIRY)
+    // {
+    //     msg->angular_velocity.y *= -1.0;
+    //     msg->angular_velocity.z *= -1.0;
         
-        msg->linear_acceleration.y *= -1.0;
-        msg->linear_acceleration.z *= -1.0;
-    }
+    //     msg->linear_acceleration.y *= -1.0;
+    //     msg->linear_acceleration.z *= -1.0;
+    // }
 
     msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
@@ -537,6 +537,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
+
 bool sync_packages(MeasureGroup &meas)
 {
     unique_lock<mutex> lock(mtx_buffer);
@@ -550,46 +551,33 @@ bool sync_packages(MeasureGroup &meas)
         meas.lidar = lidar_buffer.front();
         meas.acq_time = acq_time_buffer.front();
 
-        // for flash lidar with 4 fields (XYZI), the timestamp is the same for all points, so we can directly use the header time as both start and end time of the scan. 
-        // For other lidars, we need to calculate the start time based on the curvature field of the last point, which records the time offset of that point relative to the scan start time.
-        if (p_pre->lidar_type == RSAIRY && msg_is_XYZI)
+        // 恢复 ROS1 最鲁棒的时间区间计算逻辑
+        meas.lidar_beg_time = time_buffer.front();
+
+        if (meas.lidar->points.size() <= 1) // time too little
         {
-            // Flash lidar capture is instantaneous. Start and end times are identical.
-            meas.lidar_beg_time = time_buffer.front();
-            lidar_end_time = meas.lidar_beg_time; 
+            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
+            fins_node->logger->warn("Too few input point cloud!");
+        }
+        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+        {
+            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
         }
         else
         {
-            if(p_pre->lidar_type == RSM1){
-                meas.lidar_beg_time = time_buffer.front() - meas.lidar->points.back().curvature / double(1000);
-            }else{
-                meas.lidar_beg_time = time_buffer.front();
-            }
-            if (meas.lidar->points.size() <= 1) // time too little
-            {
-                lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
-                fins_node->logger->warn("Too few input point cloud!");
-            }
-            else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
-            {
-                lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
-            }
-            else
-            {
-                scan_num ++;
-                lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
-                lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
-            }
+            scan_num ++;
+            lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
+            lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
         }
+        
         if(lidar_type == MARSIM)
             lidar_end_time = meas.lidar_beg_time;
 
         meas.lidar_end_time = lidar_end_time;
-
         lidar_pushed = true;
     }
 
-    if (last_timestamp_imu < lidar_end_time - imu_time_tolerance) // IMU Time Tolerance from config
+    if (last_timestamp_imu < lidar_end_time - imu_time_tolerance) 
     {
         return false;
     }
@@ -1149,19 +1137,19 @@ void initialize() {
     Lidar_R_wrt_IMU << MAT_FROM_ARRAY(extrinR);
 
     // for RSAIRY, the lidar frame is NED, need to change to FLU for the IEKF to work properly
-    if (lidar_type == RSAIRY)
-    {
-        M3D NED_to_FLU;
-        NED_to_FLU << 1,  0,  0,
-                    0, -1,  0,
-                    0,  0, -1;
+    // if (lidar_type == RSAIRY)
+    // {
+    //     M3D NED_to_FLU;
+    //     NED_to_FLU << 1,  0,  0,
+    //                 0, -1,  0,
+    //                 0,  0, -1;
                     
-        // Left-multiply to transform the output into the FLU frame
-        Lidar_R_wrt_IMU = NED_to_FLU * Lidar_R_wrt_IMU; 
+    //     // Left-multiply to transform the output into the FLU frame
+    //     Lidar_R_wrt_IMU = NED_to_FLU * Lidar_R_wrt_IMU; 
         
-        // Apply the same transformation to the translation vector
-        Lidar_T_wrt_IMU = NED_to_FLU * Lidar_T_wrt_IMU; 
-    }
+    //     // Apply the same transformation to the translation vector
+    //     Lidar_T_wrt_IMU = NED_to_FLU * Lidar_T_wrt_IMU; 
+    // }
 
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
     p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));

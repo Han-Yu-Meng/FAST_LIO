@@ -307,24 +307,26 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
         for (int i = 0; i < N_SCANS; i++)
         {
             pl_buff[i].clear();
-            pl_buff[i].reserve(plsize);
+            pl_buff[i].reserve(plsize);//too large?
         }
         int num_point_each_sub_cloud = plsize/pl_orig.width/num_sub_cloud;
-        for(int i_ori_width = 0; i_ori_width < (int)pl_orig.width; i_ori_width ++){
+        robosenseM1_ros::Point first_point = pl_orig.points[num_point_each_sub_cloud * i_sub_cloud];
+        for(int i_ori_width = 0; i_ori_width < pl_orig.width; i_ori_width ++){
             for(int i_ori_height = num_point_each_sub_cloud * i_sub_cloud;
                     i_ori_height < num_point_each_sub_cloud * (i_sub_cloud+1); i_ori_height ++) {
 
                 robosenseM1_ros::Point & ori_point = pl_orig.at(i_ori_width, i_ori_height);
-                if(i_ori_height == num_point_each_sub_cloud * i_sub_cloud){
+                if(i_ori_height == num_point_each_sub_cloud * i_sub_cloud){//record time of the first point
                     start_time = ori_point.timestamp;
-                }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){
+                }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){//record time of the last point
                     end_time = ori_point.timestamp;
                 }
                 if (i_ori_height % point_filter_num != 0) {continue;}
 
-                double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
-                bool height_valid = ori_point.z < max_height && ori_point.z > 0;
-                if(range < det_range && range > blind && height_valid){
+                double range = ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z;
+                if(sqrt(range) < 150 && sqrt(range) > blind){
+
+                    Eigen::Vector3d pt_vec;
                     PointType added_pt;
                     added_pt.x = ori_point.x;
                     added_pt.y = ori_point.y;
@@ -333,7 +335,7 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
                     added_pt.normal_x = 0;
                     added_pt.normal_y = 0;
                     added_pt.normal_z = 0;
-                    added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale; 
+                    added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale; // curvature unit: ms  time_unit_scale
                     if(i_ori_width < N_SCANS){
                         pl_buff[i_ori_width].push_back(added_pt);
                     }
@@ -348,7 +350,7 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
             types.clear();
             types.resize(linesize);
             linesize--;
-            for (uint i = 0; i < (uint)linesize; i++)
+            for (uint i = 0; i < linesize; i++)
             {
                 types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
                 vx = pl[i].x - pl[i + 1].x;
@@ -362,50 +364,67 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
     }
     else
     {
+        double time_stamp = get_time_sec(msg->header.stamp);
+        //std::cout <<setprecision(18) << "\ntime_stamp of msg " << time_stamp <<std::endl;
+        // cout << "===================================" << endl;
+         //printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
+        std::vector<double> time_stamp_of_points;
+
+        //reordered
         int num_point_each_sub_cloud = plsize/pl_orig.width/num_sub_cloud;
-        pcl::PointCloud<robosenseM1_ros::Point>::Ptr pl_sub(new pcl::PointCloud<robosenseM1_ros::Point>());
-        
-        for(int i_ori_width = 0; i_ori_width < (int)pl_orig.width; i_ori_width ++){
+        robosenseM1_ros::Point first_point = pl_orig.points[num_point_each_sub_cloud * i_sub_cloud];
+        for(int i_ori_width = 0; i_ori_width < pl_orig.width; i_ori_width ++){
             for(int i_ori_height = num_point_each_sub_cloud * i_sub_cloud;
                     i_ori_height < num_point_each_sub_cloud * (i_sub_cloud+1); i_ori_height ++) {
 
                 robosenseM1_ros::Point & ori_point = pl_orig.at(i_ori_width, i_ori_height);
-                if(i_ori_height == num_point_each_sub_cloud * i_sub_cloud){
+                if(i_ori_height == num_point_each_sub_cloud * i_sub_cloud){//record time of the first point
                     start_time = ori_point.timestamp;
-                }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){
+                }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){//record time of the last point
                     end_time = ori_point.timestamp;
                 }
-                
                 if (i_ori_height % point_filter_num != 0) {continue;}
-                pl_sub->points.push_back(ori_point);
+                //downsample airy lidar points
+//                if (i_ori_height % int(ori_point.ring /3.0 +1) != 0) {continue;}
+
+                double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
+//                if(range> 30){
+//                    if (i_ori_height % 1 != 0) {continue;}
+//                } else if(range> 20){
+//                    if (i_ori_height % 2 != 0) {continue;}
+//                } else if(range> 10) {
+//                    if (i_ori_height % 5 != 0) { continue; }
+//                } else if(range> 5) {
+//                    if (i_ori_height % 8 != 0) { continue; }
+//                } else if(range> 0) {
+//                    if (i_ori_height % 10 != 0) { continue; }
+//                }
+                if(range < 150 && range > blind){
+
+                    Eigen::Vector3d pt_vec;
+                    PointType added_pt;
+                    added_pt.x = ori_point.x;
+                    added_pt.y = ori_point.y;
+                    added_pt.z = ori_point.z;
+                    added_pt.intensity = ori_point.intensity;
+                    added_pt.normal_x = 0;
+                    added_pt.normal_y = 0;
+                    added_pt.normal_z = 0;
+                    added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale; // curvature unit: ms  time_unit_scale
+                    time_stamp_of_points.push_back(added_pt.curvature);
+                    pl_surf.points.push_back(added_pt);
+                }
+
             }
         }
-
-        pcl::PointCloud<robosenseM1_ros::Point>::Ptr pl_downsampled(new pcl::PointCloud<robosenseM1_ros::Point>());
-        pcl::ApproximateVoxelGrid<robosenseM1_ros::Point> voxel_filter;
-        voxel_filter.setInputCloud(pl_sub);
-        voxel_filter.setLeafSize(0.1f, 0.1f, 0.1f); 
-        voxel_filter.filter(*pl_downsampled);
-
-        for (const auto& ori_point : pl_downsampled->points)
-        {
-            double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
-            bool height_valid = ori_point.z < max_height && ori_point.z > 0;
-            if(range < det_range && range > blind && height_valid){
-                PointType added_pt;
-                added_pt.x = ori_point.x;
-                added_pt.y = ori_point.y;
-                added_pt.z = ori_point.z;
-                added_pt.intensity = ori_point.intensity;
-                added_pt.normal_x = 0;
-                added_pt.normal_y = 0;
-                added_pt.normal_z = 0;
-                added_pt.curvature = (ori_point.timestamp-start_time) * time_unit_scale;
-                pl_surf.points.push_back(added_pt);
-            }
-        }
-        fins_node->logger->debug("Robosense M1 point size after downsample: {}", pl_surf.size());
+        //last_time_stamp = time_stamp;
+        std::sort(time_stamp_of_points.begin(), time_stamp_of_points.end());
+/*        std::cout<<setprecision(18)<< "pl surf timestamp:\n" << "min "<< time_stamp_of_points.front()  <<
+                 " max " << time_stamp_of_points.back()<<std::endl;*/
+        std::cout        << " point_size_downsample: "<< pl_surf.size()<<std::endl;
     }
+     //pub_func(pl_surf, pub_full, msg->header.stamp);
+    //  pub_func(pl_surf, pub_corn, msg->header.stamp);
 }
 
 void Preprocess::robosenseAiry_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, 
