@@ -19,13 +19,12 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include "use-ikfom.hpp"
-#include "preprocess.h"
 
 /// *************Preconfiguration
 
 #define MAX_INI_COUNT (10)
 
-bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
+const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
 
 /// *************IMU Process and undistortion
 class ImuProcess
@@ -85,7 +84,7 @@ class ImuProcess
 };
 
 ImuProcess::ImuProcess(fins::Node* fins_node_)
-    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), fins_node(fins_node_), deskew_en(true)
+    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), fins_node(fins_node_)
 {
   init_iter_num = 1;
   Q = process_noise_cov();
@@ -217,22 +216,14 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   /*** add the imu of the last frame-tail to the of current frame-head ***/
   auto v_imu = meas.imu;
   v_imu.push_front(last_imu_);
+  const double &imu_beg_time = get_time_sec(v_imu.front()->header.stamp);
   const double &imu_end_time = get_time_sec(v_imu.back()->header.stamp);
-
-  double pcl_beg_time = meas.lidar_beg_time;
-  double pcl_end_time = meas.lidar_end_time;
-
-    if (lidar_type == MARSIM) {
-        pcl_beg_time = last_lidar_end_time_;
-        pcl_end_time = meas.lidar_beg_time;
-    }
-
-    /*** sort point clouds by offset time ***/
+  const double &pcl_beg_time = meas.lidar_beg_time;
+  const double &pcl_end_time = meas.lidar_end_time;
+  
+  /*** sort point clouds by offset time ***/
   pcl_out = *(meas.lidar);
-  if (deskew_en)
-  {
-    sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
-  }
+  sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
 
   /*** Initialize IMU pose ***/
   state_ikfom imu_state = kf_state.get_x();
@@ -301,52 +292,46 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   last_lidar_end_time_ = pcl_end_time;
 
   /*** undistort each lidar point (backward propagation) ***/
-  if (!deskew_en) return;
-
   if (pcl_out.points.begin() == pcl_out.points.end()) return;
+  auto it_pcl = pcl_out.points.end() - 1;
+  for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
+  {
+    auto head = it_kp - 1;
+    auto tail = it_kp;
+    R_imu<<MAT_FROM_ARRAY(head->rot);
+    // cout<<"head imu acc: "<<acc_imu.transpose()<<endl;
+    vel_imu<<VEC_FROM_ARRAY(head->vel);
+    pos_imu<<VEC_FROM_ARRAY(head->pos);
+    acc_imu<<VEC_FROM_ARRAY(tail->acc);
+    angvel_avr<<VEC_FROM_ARRAY(tail->gyr);
 
-  if(lidar_type != MARSIM){
-      auto it_pcl = pcl_out.points.end() - 1;
-      for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
-      {
-          auto head = it_kp - 1;
-          auto tail = it_kp;
-          R_imu<<MAT_FROM_ARRAY(head->rot);
-          // cout<<"head imu acc: "<<acc_imu.transpose()<<endl;
-          vel_imu<<VEC_FROM_ARRAY(head->vel);
-          pos_imu<<VEC_FROM_ARRAY(head->pos);
-          acc_imu<<VEC_FROM_ARRAY(tail->acc);
-          angvel_avr<<VEC_FROM_ARRAY(tail->gyr);
+    for(; it_pcl->curvature / double(1000) > head->offset_time; it_pcl --)
+    {
+      dt = it_pcl->curvature / double(1000) - head->offset_time;
 
-          for(; it_pcl->curvature / double(1000) > head->offset_time; it_pcl --)
-          {
-              dt = it_pcl->curvature / double(1000) - head->offset_time;
+      /* Transform to the 'end' frame, using only the rotation
+       * Note: Compensation direction is INVERSE of Frame's moving direction
+       * So if we want to compensate a point at timestamp-i to the frame-e
+       * P_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame */
+      M3D R_i(R_imu * Exp(angvel_avr, dt));
+      
+      V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
+      V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
+      V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
+      
+      // save Undistorted points and their rotation
+      it_pcl->x = P_compensate(0);
+      it_pcl->y = P_compensate(1);
+      it_pcl->z = P_compensate(2);
 
-              /* Transform to the 'end' frame, using only the rotation
-               * Note: Compensation direction is INVERSE of Frame's moving direction
-               * So if we want to compensate a point at timestamp-i to the frame-e
-               * P_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame */
-              M3D R_i(R_imu * Exp(angvel_avr, dt));
-
-              V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
-              V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
-              V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
-
-              // save Undistorted points and their rotation
-              it_pcl->x = P_compensate(0);
-              it_pcl->y = P_compensate(1);
-              it_pcl->z = P_compensate(2);
-
-              if (it_pcl == pcl_out.points.begin()) break;
-          }
-      }
+      if (it_pcl == pcl_out.points.begin()) break;
+    }
   }
 }
 
 void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)
 {
   if(meas.imu.empty()) {return;};
-  assert(meas.lidar != nullptr);
 
   if (imu_need_init_)
   {
@@ -365,8 +350,6 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
-      fins_node->logger->info("IMU Initial Done: Gravity: {:.4f} {:.4f} {:.4f} {:.4f}; state.bias_g: {:.4f} {:.4f} {:.4f}; acc covarience: {:.8f} {:.8f} {:.8f}; gry covarience: {:.8f} {:.8f} {:.8f}",\
-              imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), imu_state.bg[0], imu_state.bg[1], imu_state.bg[2], cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1], cov_gyr[2]);
     }
 
     return;
