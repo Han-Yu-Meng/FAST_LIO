@@ -1,4 +1,5 @@
 #include "preprocess.h"
+#include <cmath>
 #include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/filters/impl/approximate_voxel_grid.hpp>
 #include <pcl/impl/pcl_base.hpp>
@@ -321,6 +322,7 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
                 }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){//record time of the last point
                     end_time = ori_point.timestamp;
                 }
+                if (std::isnan(ori_point.x) || std::isnan(ori_point.y) || std::isnan(ori_point.z)) continue;
                 if (i_ori_height % point_filter_num != 0) {continue;}
 
                 double range = ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z;
@@ -383,6 +385,7 @@ void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstS
                 }else if(i_ori_height == num_point_each_sub_cloud * (i_sub_cloud+1) - 1){//record time of the last point
                     end_time = ori_point.timestamp;
                 }
+                if (std::isnan(ori_point.x) || std::isnan(ori_point.y) || std::isnan(ori_point.z)) continue;
                 if (i_ori_height % point_filter_num != 0) {continue;}
                 //downsample airy lidar points
 //                if (i_ori_height % int(ori_point.ring /3.0 +1) != 0) {continue;}
