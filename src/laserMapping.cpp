@@ -90,6 +90,7 @@ bool   scan_pub_en = false, scan_body_pub_en = false, time_sync_en = false;
 bool extrinsic_est_en = false;
 int lidar_type;
 bool use_imu_odometry_ = true;
+bool planar_constraint_ = false;
 int imu_window_size = 200;
 std::deque<Eigen::Vector3d> imu_ang_vel_window_;
 Eigen::Vector3d avg_ang_vel_ = Eigen::Vector3d::Zero();
@@ -365,6 +366,7 @@ void process_and_publish_imu_odometry(
 
     M3D R_odom_base = base_R_lidar * R_I_W * R_L_I * R_base_inv;
     V3D t_odom_base = base_R_lidar * (R_I_W * (R_L_I * (-R_base_inv * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos) + base_T_lidar;
+    apply_planar_constraint(R_odom_base, t_odom_base);
     Eigen::Quaterniond q_base(R_odom_base);
 
     nav_msgs::msg::Odometry imu_odometry;
@@ -393,12 +395,12 @@ void process_and_publish_imu_odometry(
     vect3 vel_base = base_R_lidar * R_L_I_T * vel_base_in_IMU; 
     imu_odometry.twist.twist.linear.x = vel_base(0);
     imu_odometry.twist.twist.linear.y = vel_base(1);
-    imu_odometry.twist.twist.linear.z = vel_base(2);
+    imu_odometry.twist.twist.linear.z = planar_constraint_ ? 0.0 : vel_base(2);
 
     // 角速度转到 base_link_frame
     vect3 ang_vel_base = base_R_lidar * R_L_I_T * smoothed_ang_vel;
-    imu_odometry.twist.twist.angular.x = ang_vel_base(0);
-    imu_odometry.twist.twist.angular.y = ang_vel_base(1);
+    imu_odometry.twist.twist.angular.x = planar_constraint_ ? 0.0 : ang_vel_base(0);
+    imu_odometry.twist.twist.angular.y = planar_constraint_ ? 0.0 : ang_vel_base(1);
     imu_odometry.twist.twist.angular.z = ang_vel_base(2);
 
     // 发布里程计
@@ -629,17 +631,44 @@ void publish_raw_body(const PointCloudXYZI::Ptr& ptr, const fins::AcqTime &acq_t
     }
 }
 
+void apply_planar_constraint(M3D &R, V3D &t) {
+	if (!planar_constraint_) return;
+	double yaw = std::atan2(R(1,0), R(0,0));
+	R = M3D::Identity();
+	R(0,0) = std::cos(yaw); R(0,1) = -std::sin(yaw);
+	R(1,0) = std::sin(yaw); R(1,1) =  std::cos(yaw);
+	t(2) = 0.0;
+}
+
 template<typename T>
 void set_posestamp(T & out)
 {
-    out.pose.position.x = state_point.pos(0);
-    out.pose.position.y = state_point.pos(1);
-    out.pose.position.z = state_point.pos(2);
-    out.pose.orientation.x = geoQuat.x;
-    out.pose.orientation.y = geoQuat.y;
-    out.pose.orientation.z = geoQuat.z;
-    out.pose.orientation.w = geoQuat.w;
-    
+    if (planar_constraint_) {
+        // Force z=0 and use only yaw from quaternion
+        out.pose.position.x = state_point.pos(0);
+        out.pose.position.y = state_point.pos(1);
+        out.pose.position.z = 0.0;
+
+        // Extract yaw from geoQuat and set roll=pitch=0
+        double siny_cosp = 2.0 * (geoQuat.w * geoQuat.z + geoQuat.x * geoQuat.y);
+        double cosy_cosp = 1.0 - 2.0 * (geoQuat.y * geoQuat.y + geoQuat.z * geoQuat.z);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
+
+        double cy = std::cos(yaw * 0.5);
+        double sy = std::sin(yaw * 0.5);
+        out.pose.orientation.x = 0.0;
+        out.pose.orientation.y = 0.0;
+        out.pose.orientation.z = sy;
+        out.pose.orientation.w = cy;
+    } else {
+        out.pose.position.x = state_point.pos(0);
+        out.pose.position.y = state_point.pos(1);
+        out.pose.position.z = state_point.pos(2);
+        out.pose.orientation.x = geoQuat.x;
+        out.pose.orientation.y = geoQuat.y;
+        out.pose.orientation.z = geoQuat.z;
+        out.pose.orientation.w = geoQuat.w;
+    }
 }
 
 void publish_imu_odometry(const nav_msgs::msg::Odometry &odom, fins::AcqTime t)
@@ -671,6 +700,7 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
         // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
         M3D R_odom_base = base_R_lidar * state_point.rot.toRotationMatrix() * state_point.offset_R_L_I.toRotationMatrix() * base_R_lidar.transpose();
         V3D t_odom_base = base_R_lidar * (state_point.rot.toRotationMatrix() * (state_point.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar) + state_point.offset_T_L_I) + state_point.pos) + base_T_lidar;
+        apply_planar_constraint(R_odom_base, t_odom_base);
         Eigen::Quaterniond q_base(R_odom_base);
 
         odomAftMapped.pose.pose.position.x = t_odom_base(0);
@@ -709,13 +739,13 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
 
         odomAftMapped.twist.twist.linear.x = vel_base(0);
         odomAftMapped.twist.twist.linear.y = vel_base(1);
-        odomAftMapped.twist.twist.linear.z = vel_base(2);
+        odomAftMapped.twist.twist.linear.z = planar_constraint_ ? 0.0 : vel_base(2);
 
         // 角速度从 IMU 体系转到 base_link_frame：R_BI = R_BL * R_LI^T
         vect3 ang_vel_base = base_R_lidar * state_point.offset_R_L_I.toRotationMatrix().transpose() * omega_IMU;
 
-        odomAftMapped.twist.twist.angular.x = ang_vel_base(0);
-        odomAftMapped.twist.twist.angular.y = ang_vel_base(1);
+        odomAftMapped.twist.twist.angular.x = planar_constraint_ ? 0.0 : ang_vel_base(0);
+        odomAftMapped.twist.twist.angular.y = planar_constraint_ ? 0.0 : ang_vel_base(1);
         odomAftMapped.twist.twist.angular.z = ang_vel_base(2);
 
         if (fins_node->required("odometry")) {
@@ -929,6 +959,9 @@ void initialize() {
 
     use_imu_odometry_ = common.get("use_imu_odometry", false)
                               .with_description("use imu odometry");
+
+    planar_constraint_ = common.get("planar_constraint", false)
+                                .with_description("force planar output: roll=0, pitch=0, z=0");
 
     imu_window_size = common.get("imu_window_size", 10)
                             .with_description("imu window size")

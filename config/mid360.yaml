@@ -11,6 +11,7 @@ FastLIO:
     time_sync_en: false                     # 是否开启软件时间同步。如果硬件（LiDAR和IMU）已经通过 PTP 或 PPS 同步，这里设为 false
     time_offset_lidar_to_imu: 0.0
     use_imu_odometry: true                  # true = 输出imu里程计，false = 输出lidar里程计
+    planar_constraint: false              # 平面机器人约束：true = 强制输出位姿 roll=0, pitch=0, z=0
     imu_window_size: 5                    # imu 滑动窗口大小
     imu_time_tolerance: 0.01               # IMU时间容忍度（单位：秒），用于同步IMU和LiDAR数据
 
