@@ -5,7 +5,7 @@ project(FAST_LIO)
 find_package(PCL       REQUIRED)
 find_package(Eigen3    REQUIRED)
 find_package(OpenMP    REQUIRED)
-find_package(livox_msg REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
 
 add_compile_options(
     -Wno-reorder
@@ -42,7 +42,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     OpenMP::OpenMP_CXX
     ${PCL_LIBRARIES} 
     pcl_surface
-    livox_msg::livox_msg
+    livox_ros_driver2::livox_interfaces2__rosidl_generator_cpp
+    livox_ros_driver2::livox_interfaces2__rosidl_typesupport_cpp
 )
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
