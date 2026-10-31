@@ -24,6 +24,13 @@ fins_add_node(${PROJECT_NAME}
   include/ikd-Tree/ikd_Tree.cpp
 )
 
+if(TARGET livox_ros_driver2::livox_interfaces2__rosidl_generator_cpp)
+    set(LIVOX_MSG_PREFIX livox_interfaces2)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE LIVOX_INTERFACES2)
+else()
+    set(LIVOX_MSG_PREFIX livox_ros_driver2)
+endif()
+
 target_include_directories(${PROJECT_NAME} PUBLIC 
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -42,8 +49,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     OpenMP::OpenMP_CXX
     ${PCL_LIBRARIES} 
     pcl_surface
-    livox_ros_driver2::livox_interfaces2__rosidl_generator_cpp
-    livox_ros_driver2::livox_interfaces2__rosidl_typesupport_cpp
+    livox_ros_driver2::${LIVOX_MSG_PREFIX}__rosidl_generator_cpp
+    livox_ros_driver2::${LIVOX_MSG_PREFIX}__rosidl_typesupport_cpp
 )
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
