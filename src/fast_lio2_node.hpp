@@ -16,6 +16,7 @@
 #include "laserMapping.cpp"
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -44,6 +45,7 @@ public:
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
     register_output<geometry_msgs::msg::TransformStamped>("$T_{odom}^{base}$");
+    register_output<geometry_msgs::msg::Twist>("zupt_status");
   }
 
   void initialize() override {

@@ -55,6 +55,8 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include "preprocess.h"
+#include "zupt.hpp"
+#include <geometry_msgs/msg/twist.hpp>
 #include <ikd-Tree/ikd_Tree.h>
 
 #define INIT_TIME           (0.1)
@@ -140,6 +142,10 @@ geometry_msgs::msg::PoseStamped msg_body_pose;
 
 shared_ptr<Preprocess> p_pre;
 shared_ptr<ImuProcess> p_imu;
+
+/*** zero-velocity update (ZUPT) ***/
+zupt::Params zupt_params_;
+zupt::Detector zupt_detector_;
 
 void pointBodyToWorld_ikfom(PointType const * const pi, PointType * const po, state_ikfom &s)
 {
@@ -454,6 +460,12 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
     
     // Normalize acc if possible, but we need mean_acc from imu_process
     acc = acc * G_m_s2 / p_imu->get_mean_acc().norm();
+
+    // feed the zero-velocity detector with normalized IMU measurements
+    if (zupt_params_.enable)
+    {
+        zupt_detector_.push(acc, ang_vel, timestamp);
+    }
 
     input_ikfom in;
     in.acc = acc;
@@ -779,6 +791,20 @@ void publish_path(const fins::AcqTime &acq_time)
     }
 }
 
+void publish_zupt_status(const fins::AcqTime &acq_time)
+{
+    if (!fins_node->required("zupt_status")) return;
+    const auto &s = zupt_detector_.status();
+    geometry_msgs::msg::Twist st;
+    st.linear.x  = s.stationary ? 1.0 : 0.0;  // stationary flag
+    st.linear.y  = s.stat;                    // detector test statistic
+    st.linear.z  = s.acc_dev;                 // | |mean acc| - g |
+    st.angular.x = s.gyro_norm;               // |mean gyro|
+    st.angular.y = s.mean_acc_norm;           // |mean acc|
+    st.angular.z = static_cast<double>(s.win_size);
+    fins_node->send("zupt_status", st, acq_time);
+}
+
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
     laserCloudOri->clear(); 
@@ -1027,7 +1053,59 @@ void initialize() {
                .with_description("extrinsic translation");
     extrinR = mapping.get("extrinsic_R", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1})
                .with_description("extrinsic rotation");
-    
+
+    fins::ParamLoader zupt_cfg("FastLIO.zupt");
+    zupt_params_.enable = zupt_cfg.get("enable", false)
+                              .with_description("enable zero-velocity update (ZUPT)");
+    zupt_params_.window_sec = zupt_cfg.get("window_sec", 0.15)
+                                  .with_description("zero-velocity detector window [s]")
+                                  .greater_than(0.0);
+    zupt_params_.detector_type = zupt_cfg.get<int>("detector_type", 0)
+                                     .with_description("0=GLRT(SHOE) 1=MV 2=MAG 3=ARE")
+                                     .one_of({zupt::DET_GLRT, zupt::DET_MV, zupt::DET_MAG, zupt::DET_ARE});
+    zupt_params_.sigma_acc = zupt_cfg.get("sigma_acc", 0.15)
+                                 .with_description("accel white-noise std [m/s^2], GLRT weight")
+                                 .greater_than(0.0);
+    zupt_params_.sigma_gyr = zupt_cfg.get("sigma_gyr", 0.02)
+                                 .with_description("gyro white-noise std [rad/s], GLRT weight")
+                                 .greater_than(0.0);
+    zupt_params_.gamma = zupt_cfg.get("gamma", 10.0)
+                             .with_description("detector threshold, stat <= gamma means stationary")
+                             .greater_than(0.0);
+    zupt_params_.max_gyro_mean = zupt_cfg.get("max_gyro_mean", 0.06)
+                                     .with_description("hard gate on |mean gyro| [rad/s], 0 disables the gate");
+    zupt_params_.max_acc_dev = zupt_cfg.get("max_acc_dev", 0.5)
+                                   .with_description("hard gate on ||a|-g| [m/s^2], 0 disables the gate");
+    zupt_params_.enter_cnt = zupt_cfg.get("enter_cnt", 2)
+                                 .with_description("consecutive hits before entering stationary")
+                                 .greater_than(0);
+    zupt_params_.exit_cnt = zupt_cfg.get("exit_cnt", 1)
+                                .with_description("consecutive misses before leaving stationary")
+                                .greater_than(0);
+    zupt_params_.vel_zupt = zupt_cfg.get("vel_zupt", true)
+                                .with_description("velocity ZUPT rows (v=0 pseudo measurement)");
+    zupt_params_.gyro_zupt = zupt_cfg.get("gyro_zupt", true)
+                                 .with_description("angular-rate ZUPT rows (observes gyro bias)");
+    zupt_params_.gravity_constraint = zupt_cfg.get("gravity_constraint", true)
+                                          .with_description("gravity rows (observes roll/pitch and accel bias)");
+    zupt_params_.sigma_vel = zupt_cfg.get("sigma_vel", 0.03)
+                                 .with_description("velocity ZUPT noise std [m/s]")
+                                 .greater_than(0.0);
+    zupt_params_.sigma_bg = zupt_cfg.get("sigma_bg", 0.02)
+                                .with_description("angular-rate ZUPT noise std [rad/s]")
+                                .greater_than(0.0);
+    zupt_params_.sigma_grav = zupt_cfg.get("sigma_grav", 0.10)
+                                  .with_description("gravity constraint noise std [m/s^2]")
+                                  .greater_than(0.0);
+    zupt_params_.update_mode = zupt_cfg.get<int>("update_mode", 2)
+                                   .with_description("0=detect only, 1=covariance damping only, 2=full update")
+                                   .one_of({zupt::MODE_NONE, zupt::MODE_COV_ONLY, zupt::MODE_FULL});
+    zupt_detector_.set_params(zupt_params_);
+    fins_node->logger->info("ZUPT config: enable={} detector={} gamma={:.2f} mode={} vel={} gyro={} gravity={}",
+                            zupt_params_.enable, zupt_params_.detector_type, zupt_params_.gamma,
+                            zupt_params_.update_mode, zupt_params_.vel_zupt, zupt_params_.gyro_zupt,
+                            zupt_params_.gravity_constraint);
+
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
     downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
 
@@ -1076,6 +1154,26 @@ void loop_once() {
             p_imu->Process(Measures, kf, feats_undistort);
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+
+            /*** zero-velocity update right after IMU propagation ***/
+            if (zupt_params_.enable && zupt_detector_.stationary())
+            {
+                std::string zupt_log;
+                if (zupt::apply_update(kf, zupt_detector_, zupt_params_, &zupt_log))
+                {
+                    state_point = kf.get_x();
+                    pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+                    static int zupt_apply_count = 0;
+                    if ((zupt_apply_count++ % 20) == 0)
+                    {
+                        fins_node->logger->info("ZUPT: {}", zupt_log);
+                    }
+                }
+                else if (!zupt_log.empty())
+                {
+                    fins_node->logger->warn("ZUPT skipped: {}", zupt_log);
+                }
+            }
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
@@ -1151,6 +1249,7 @@ void loop_once() {
             publish_lidar_odometry(Measures.acq_time);
         }
         publish_path(Measures.acq_time);
+        publish_zupt_status(Measures.acq_time);
 
         /*** add the feature points to map kdtree ***/
         double t_incre_start, t_incre_end;

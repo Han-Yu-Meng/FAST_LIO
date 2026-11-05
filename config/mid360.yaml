@@ -38,3 +38,22 @@ FastLIO:
     extrinsic_R: [1, 0.0, 0,
                    0.0,    1.0, 0.0,
                   0, 0.0, 1 ]
+
+  zupt:                          # 零速更新（Zero-Velocity Update）
+    enable: true                 # 总开关
+    window_sec: 0.15             # 零速检测窗口长度（秒）
+    detector_type: 0             # 0=GLRT/SHOE  1=加速度滑动方差MV  2=加速度模值MAG  3=角速度能量ARE
+    sigma_acc: 0.15              # GLRT 加速度白噪声标准差 [m/s^2]（检测器权重）
+    sigma_gyr: 0.02              # GLRT 陀螺白噪声标准差 [rad/s]（检测器权重）
+    gamma: 10.0                  # 检测阈值：stat <= gamma 判为静止（需按实测数据标定）
+    max_gyro_mean: 0.06          # 硬门限：窗口平均角速度 [rad/s]，0 表示禁用
+    max_acc_dev: 0.5             # 硬门限：||a|-g| [m/s^2]，0 表示禁用
+    enter_cnt: 2                 # 进入静止所需的连续命中次数
+    exit_cnt: 1                  # 退出静止所需的连续未命中次数
+    vel_zupt: true               # 速度 ZUPT：v=0 伪量测
+    gyro_zupt: true              # 角速度 ZUPT：静止时陀螺输出观测零偏 bg
+    gravity_constraint: true     # 重力约束：静止时加计观测 roll/pitch 与零偏 ba
+    sigma_vel: 0.03              # 速度 ZUPT 量测噪声 [m/s]
+    sigma_bg: 0.02               # 角速度 ZUPT 量测噪声 [rad/s]
+    sigma_grav: 0.10             # 重力约束量测噪声 [m/s^2]
+    update_mode: 2               # 0=只检测不更新  1=只收缩协方差  2=完整更新

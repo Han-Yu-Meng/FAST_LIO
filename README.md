@@ -1,5 +1,7 @@
 Default config: [config/mid360.yaml](config/mid360.yaml)
 
+ZUPT (zero-velocity update) support: see [doc/ZUPT.md](doc/ZUPT.md) (原理、参数、调参指南) and `scripts/zupt_check.py`.
+
 ## Related Works and Extended Application
 
 **SLAM:**
