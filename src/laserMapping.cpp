@@ -91,6 +91,16 @@ bool extrinsic_est_en = false;
 int lidar_type;
 bool use_imu_odometry_ = true;
 bool planar_constraint_ = false;
+bool   frame_refactor_ = false;        // 干净坐标系：IMU 预旋到水平车体系 + 安装角只计一次
+double attitude_factor_sigma_ = 0.0;  // 每帧 roll/pitch 姿态伪量测噪声 [rad]，0 = 关闭
+bool   tf_latched_ = false;            // /tf_static 已到达并完成外参注入
+M3D    R_level_ = Eye3d;               // 锁存的 lidar->base 旋转（≈18° 安装角）
+V3D    t_extrin_orig_{Zero3d};         // 配置里的原始 lidar->IMU 平移
+M3D    R_extrin_orig_{Eye3d};           // 配置里的原始 lidar->IMU 旋转
+std::deque<sensor_msgs::msg::Imu::SharedPtr> pending_imu_;  // TF 未到时暂存
+std::chrono::steady_clock::time_point refactor_start_time_ = std::chrono::steady_clock::now();  // 等待 TF 的起点
+double tf_wait_timeout_s_ = 10.0;      // 等 /tf_static 超时后降级回原始坐标系
+int    att_log_counter_ = 0;
 int imu_window_size = 200;
 std::deque<Eigen::Vector3d> imu_ang_vel_window_;
 Eigen::Vector3d avg_ang_vel_ = Eigen::Vector3d::Zero();
@@ -364,8 +374,17 @@ void process_and_publish_imu_odometry(
     M3D R_I_W = imu_state.rot.toRotationMatrix();
     M3D R_base_inv = base_R_lidar.transpose();
 
-    M3D R_odom_base = base_R_lidar * R_I_W * R_L_I * R_base_inv;
-    V3D t_odom_base = base_R_lidar * (R_I_W * (R_L_I * (-R_base_inv * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos) + base_T_lidar;
+    M3D R_odom_base;
+    V3D t_odom_base;
+    if (frame_refactor_) {
+        // 内部世界系已水平（IMU 预旋 + 外参注入 R_level_），只删最外层
+        // base_R_lidar* 前导；尾部 +base_T_lidar、右侧共轭、内侧杠杆臂保留。
+        R_odom_base = R_I_W * R_L_I * R_base_inv;
+        t_odom_base = R_I_W * (R_L_I * (-R_base_inv * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos + base_T_lidar;
+    } else {
+        R_odom_base = base_R_lidar * R_I_W * R_L_I * R_base_inv;
+        t_odom_base = base_R_lidar * (R_I_W * (R_L_I * (-R_base_inv * base_T_lidar) + imu_state.offset_T_L_I) + imu_state.pos) + base_T_lidar;
+    }
     apply_planar_constraint(R_odom_base, t_odom_base);
     Eigen::Quaterniond q_base(R_odom_base);
 
@@ -407,10 +426,38 @@ void process_and_publish_imu_odometry(
     publish_imu_odometry(imu_odometry, t);
 }
 
-void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime t) 
+// /tf_static 迟迟未到时降级回原始坐标系：置 frame_refactor_=false 后，
+// IMU 预旋、外参注入、三个输出改写、姿态约束分支都会自动走原版路径，
+// 由此消除「TF 缺失 -> 永久静默、不发 odom」这一新故障模式。
+void maybe_fallback_tf_timeout()
+{
+    if (!frame_refactor_ || tf_latched_) return;
+    double waited = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - refactor_start_time_).count();
+    if (waited <= tf_wait_timeout_s_) return;
+
+    size_t n_flush = 0;
+    mtx_buffer.lock();
+    for (auto &p : pending_imu_) {
+        imu_buffer.push_back(p);                      // 原样入 buffer，未预旋
+        last_timestamp_imu = get_time_sec(p->header.stamp);
+        n_flush++;
+    }
+    pending_imu_.clear();
+    mtx_buffer.unlock();
+    frame_refactor_ = false;
+    sig_buffer.notify_all();
+    fins_node->logger->warn(
+        "Frame refactor: /tf_static absent after {:.1f}s, fallback to ORIGINAL frame "
+        "(frame_refactor disabled, {} pending IMU released unrotated)",
+        waited, n_flush);
+}
+
+void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime t)
 {
     // fins_node->logger->info("Received IMU message with timestamp {}", get_time_sec(msg_in->header.stamp));
     publish_count ++;
+    maybe_fallback_tf_timeout();
 
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
@@ -419,6 +466,40 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
     {
         msg->header.stamp = \
         get_ros_time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
+    }
+
+    // LIO-SAM imuConverter() + MakeSharedU(imuGravity) 的等价物：用 /tf_static
+    // 的 lidar->base 旋转（含 18° 安装角）把 acc/gyro 预旋到水平车体系，使
+    // mean_acc≈(0,0,+g)、grav≈(0,0,-g)，世界系从第一帧水平。
+    // TF 未到时暂存，绝不把未预旋的 IMU 放进 imu_buffer（否则 IMU_init
+    // 拿到倾斜的 mean_acc，整个重构失效）。
+    if (frame_refactor_ && !tf_latched_)
+    {
+        mtx_buffer.lock();
+        if (pending_imu_.size() < 2000) {
+            pending_imu_.push_back(msg);
+        }
+        bool over = pending_imu_.size() >= 2000;
+        mtx_buffer.unlock();
+        if (over && publish_count % 200 == 0) {
+            fins_node->logger->warn("Frame refactor: TF not received, 2000 IMU msgs pending (dropping)");
+        }
+        return;
+    }
+    if (frame_refactor_ && tf_latched_)
+    {
+        V3D acc_raw(msg_in->linear_acceleration.x, msg_in->linear_acceleration.y,
+                    msg_in->linear_acceleration.z);
+        V3D gyr_raw(msg_in->angular_velocity.x, msg_in->angular_velocity.y,
+                    msg_in->angular_velocity.z);
+        V3D acc_l = R_level_ * acc_raw;
+        V3D gyr_l = R_level_ * gyr_raw;
+        msg->linear_acceleration.x = acc_l(0);
+        msg->linear_acceleration.y = acc_l(1);
+        msg->linear_acceleration.z = acc_l(2);
+        msg->angular_velocity.x = gyr_l(0);
+        msg->angular_velocity.y = gyr_l(1);
+        msg->angular_velocity.z = gyr_l(2);
     }
 
     double timestamp = get_time_sec(msg->header.stamp);
@@ -449,9 +530,9 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
     }
 
     V3D ang_vel, acc;
-    ang_vel << msg_in->angular_velocity.x, msg_in->angular_velocity.y, msg_in->angular_velocity.z;
-    acc << msg_in->linear_acceleration.x, msg_in->linear_acceleration.y, msg_in->linear_acceleration.z;
-    
+    ang_vel << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
+    acc << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
+
     // Normalize acc if possible, but we need mean_acc from imu_process
     acc = acc * G_m_s2 / p_imu->get_mean_acc().norm();
 
@@ -459,7 +540,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
     in.acc = acc;
     in.gyro = ang_vel;
 
-    process_and_publish_imu_odometry(msg_in, dt, in, use_imu_odometry_, t);
+    process_and_publish_imu_odometry(msg, dt, in, use_imu_odometry_, t);
 }
 
 double lidar_mean_scantime = 0.0;
@@ -582,8 +663,16 @@ void publish_frame_world(const fins::AcqTime &acq_time)
 
         M3D R_L_I = state_point.offset_R_L_I.toRotationMatrix();
         M3D R_I_W = state_point.rot.toRotationMatrix();
-        M3D R_odom_lidar = base_R_lidar * R_I_W * R_L_I;
-        V3D t_odom_lidar = base_R_lidar * (R_I_W * state_point.offset_T_L_I + state_point.pos) + base_T_lidar;
+        M3D R_odom_lidar;
+        V3D t_odom_lidar;
+        if (frame_refactor_) {
+            // 只删最外层 base_R_lidar* 前导；+base_T_lidar 保留，保证与原版逐点等价。
+            R_odom_lidar = R_I_W * R_L_I;
+            t_odom_lidar = (R_I_W * state_point.offset_T_L_I + state_point.pos) + base_T_lidar;
+        } else {
+            R_odom_lidar = base_R_lidar * R_I_W * R_L_I;
+            t_odom_lidar = base_R_lidar * (R_I_W * state_point.offset_T_L_I + state_point.pos) + base_T_lidar;
+        }
 
         // #pragma omp parallel for schedule(dynamic, 512)
         for (int i = 0; i < size; i++)
@@ -698,8 +787,19 @@ void publish_lidar_odometry(const fins::AcqTime &acq_time) {
 
         // Transform state_point.pos and state_point.rot to base_link_frame
         // T_odom_base = T_base_lidar * T_lidar_init_lidar_curr * T_lidar_base
-        M3D R_odom_base = base_R_lidar * state_point.rot.toRotationMatrix() * state_point.offset_R_L_I.toRotationMatrix() * base_R_lidar.transpose();
-        V3D t_odom_base = base_R_lidar * (state_point.rot.toRotationMatrix() * (state_point.offset_R_L_I.toRotationMatrix() * (-base_R_lidar.transpose() * base_T_lidar) + state_point.offset_T_L_I) + state_point.pos) + base_T_lidar;
+        M3D R_W_I = state_point.rot.toRotationMatrix();
+        M3D R_L_I = state_point.offset_R_L_I.toRotationMatrix();
+        M3D R_odom_base;
+        V3D t_odom_base;
+        if (frame_refactor_) {
+            // 只删最外层 base_R_lidar* 前导；尾部 +base_T_lidar、右侧共轭、
+            // 内侧杠杆臂全部保留，保证与原版逐点等价。
+            R_odom_base = R_W_I * R_L_I * base_R_lidar.transpose();
+            t_odom_base = R_W_I * (R_L_I * (-base_R_lidar.transpose() * base_T_lidar) + state_point.offset_T_L_I) + state_point.pos + base_T_lidar;
+        } else {
+            R_odom_base = base_R_lidar * R_W_I * R_L_I * base_R_lidar.transpose();
+            t_odom_base = base_R_lidar * (R_W_I * (R_L_I * (-base_R_lidar.transpose() * base_T_lidar) + state_point.offset_T_L_I) + state_point.pos) + base_T_lidar;
+        }
         apply_planar_constraint(R_odom_base, t_odom_base);
         Eigen::Quaterniond q_base(R_odom_base);
 
@@ -913,7 +1013,51 @@ LaserMapping(fins::Node* node_ptr)
 void update_transform(const geometry_msgs::msg::TransformStamped &msg)
 {
     base_T_lidar = V3D(msg.transform.translation.x, msg.transform.translation.y, msg.transform.translation.z);
-    base_R_lidar = Eigen::Quaterniond(msg.transform.rotation.w, msg.transform.rotation.x, msg.transform.rotation.y, msg.transform.rotation.z).toRotationMatrix();
+    M3D R_new_tf = Eigen::Quaterniond(msg.transform.rotation.w, msg.transform.rotation.x, msg.transform.rotation.y, msg.transform.rotation.z).toRotationMatrix();
+    if (frame_refactor_ && !tf_latched_)
+    {
+        R_level_ = R_new_tf;
+        base_R_lidar = R_level_;
+        // IMU 数据已预旋到水平车体系，lidar->IMU 外参随之整体左乘 R_level_。
+        // 用保存的原始值计算，绝不就地连乘（防止二次 TF 把安装角叠加多次）。
+        V3D t_new = R_level_ * t_extrin_orig_;
+        M3D R_new = R_level_ * R_extrin_orig_;
+        Lidar_T_wrt_IMU = t_new;
+        Lidar_R_wrt_IMU = R_new;
+        p_imu->set_extrinsic(t_new, R_new);
+
+        // flush TF 到达前暂存的 IMU（补做预旋后再入 buffer）
+        size_t n_flush = 0;
+        mtx_buffer.lock();
+        for (auto &p : pending_imu_)
+        {
+            V3D a(p->linear_acceleration.x, p->linear_acceleration.y, p->linear_acceleration.z);
+            V3D g(p->angular_velocity.x, p->angular_velocity.y, p->angular_velocity.z);
+            V3D al = R_level_ * a, gl = R_level_ * g;
+            p->linear_acceleration.x = al(0); p->linear_acceleration.y = al(1); p->linear_acceleration.z = al(2);
+            p->angular_velocity.x = gl(0); p->angular_velocity.y = gl(1); p->angular_velocity.z = gl(2);
+            imu_buffer.push_back(p);
+            last_timestamp_imu = get_time_sec(p->header.stamp);
+            n_flush++;
+        }
+        pending_imu_.clear();
+        mtx_buffer.unlock();
+        sig_buffer.notify_all();
+        fins_node->logger->info("Frame refactor: TF latched, extrinsic injected, {} pending IMU flushed", n_flush);
+    }
+    else if (frame_refactor_ && tf_latched_)
+    {
+        // 二次 TF：只校验，绝不重复注入；保持锁存的 R_level_ 不变。
+        if ((R_new_tf - R_level_).norm() > 1e-6) {
+            fins_node->logger->warn("Frame refactor: static transform changed after latch; ignoring");
+        }
+        base_R_lidar = R_level_;
+    }
+    else
+    {
+        base_R_lidar = R_new_tf;
+    }
+    tf_latched_ = true;
     static_transform_received = true;
     // fins_node->logger->info("Static transform from {} to {} updated.", msg.header.frame_id, msg.child_frame_id);
 }
@@ -962,6 +1106,16 @@ void initialize() {
 
     planar_constraint_ = common.get("planar_constraint", false)
                                 .with_description("force planar output: roll=0, pitch=0, z=0");
+
+    frame_refactor_ = common.get("frame_refactor", false)
+                            .with_description("level world frame: pre-rotate IMU by /tf_static and inject extrinsic once");
+
+    attitude_factor_sigma_ = common.get("attitude_factor_sigma", 0.0)
+                                   .with_description("per-frame roll/pitch pseudo-measurement sigma [rad]; 0 disables");
+
+    tf_wait_timeout_s_ = common.get("tf_wait_timeout", 10.0)
+                                .with_description("seconds to wait for /tf_static before falling back to the original frame");
+    refactor_start_time_ = std::chrono::steady_clock::now();
 
     imu_window_size = common.get("imu_window_size", 10)
                             .with_description("imu window size")
@@ -1033,12 +1187,17 @@ void initialize() {
 
     Lidar_T_wrt_IMU << VEC_FROM_ARRAY(extrinT);
     Lidar_R_wrt_IMU << MAT_FROM_ARRAY(extrinR);
+    t_extrin_orig_ = Lidar_T_wrt_IMU;
+    R_extrin_orig_ = Lidar_R_wrt_IMU;
 
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
     p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
     p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
+    fins_node->logger->info("Frame refactor: {} (attitude_sigma {:.4f}); extrinT {:.4f} {:.4f} {:.4f}",
+                             frame_refactor_ ? "ON" : "OFF", attitude_factor_sigma_,
+                             t_extrin_orig_(0), t_extrin_orig_(1), t_extrin_orig_(2));
 
     FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
     HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
@@ -1060,6 +1219,10 @@ void initialize() {
 }
 
 void loop_once() {
+    maybe_fallback_tf_timeout();  // 双保险：只有点云帧驱动时也能触发超时降级
+    // 干净坐标系下，TF 未锁存前绝不消费任何帧：保证 IMU_init 看到的首批
+    // IMU 全部是预旋后的数据，否则 mean_acc 仍是倾斜的、重构失效。
+    if (frame_refactor_ && !tf_latched_) return;
     if(sync_packages(Measures))  {
         if (flg_first_scan)
         {
@@ -1131,6 +1294,52 @@ void loop_once() {
             auto t = fins_node->recorder("state_estimation", Measures.acq_time);
             t_update_start = omp_get_wtime();
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV);
+
+            if (frame_refactor_ && attitude_factor_sigma_ > 0.0 && tf_latched_)
+            {
+                // 每帧把姿态 roll/pitch 拉向水平：LIO-SAM 首帧 Prior 的 ESKF
+                // 等价物。约束对象是 rot（DOF 3-5）而不是 grav —— 新框架下
+                // a'≈(0,0,g)、grav≈(0,0,-g)，rot≈R_z(yaw) 时 v̇'≈0 自洽，
+                // 不会像约束 grav 那样破坏 |R·a'+grav|≈0 而发散。
+                state_ikfom s = kf.get_x();
+                Eigen::Matrix<double, 23, 23> P = kf.get_P();
+
+                M3D Rcur = s.rot.toRotationMatrix();
+                double yaw = std::atan2(Rcur(1, 0), Rcur(0, 0));
+                SO3 ref = SO3(Eigen::Quaterniond(std::cos(yaw / 2.0), 0.0, 0.0,
+                                                  std::sin(yaw / 2.0)));
+                Eigen::Matrix<double, 3, 1> r3;
+                ref.boxminus(r3, s.rot);          // s.rot (+) r3 == ref
+                Eigen::Matrix<double, 2, 1> r(r3(0), r3(1));
+
+                if (r.norm() < 5.0 * M_PI / 180.0)  // 门控：不硬拉大偏差
+                {
+                    Eigen::Matrix<double, 2, 23> H =
+                        Eigen::Matrix<double, 2, 23>::Zero();
+                    H(0, 3) = 1.0;                 // SO3 体切空间 roll
+                    H(1, 4) = 1.0;                 // SO3 体切空间 pitch
+
+                    const double sg2 = attitude_factor_sigma_ * attitude_factor_sigma_;
+                    Eigen::Matrix2d Rg = Eigen::Matrix2d::Identity() * sg2;
+                    Eigen::Matrix2d S = H * P * H.transpose() + Rg;
+                    Eigen::Matrix<double, 23, 2> K = P * H.transpose() * S.inverse();
+
+                    Eigen::Matrix<double, 23, 1> dx = K * r;
+                    s.boxplus(dx);
+
+                    Eigen::Matrix<double, 23, 23> A =
+                        Eigen::Matrix<double, 23, 23>::Identity() - K * H;
+                    P = A * P * A.transpose() + K * Rg * K.transpose();  // Joseph form
+
+                    kf.change_x(s);
+                    kf.change_P(P);
+                    if (att_log_counter_++ % 100 == 0) {
+                        fins_node->logger->info(
+                            "Attitude factor: |r| {:.4f} deg, |dx| {:.6f}, sigma {:.4f}",
+                            r.norm() * 180.0 / M_PI, dx.norm(), attitude_factor_sigma_);
+                    }
+                }
+            }
             state_point = kf.get_x();
             t_update_end = omp_get_wtime();
 
