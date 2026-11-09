@@ -40,6 +40,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 
 fins_link_ros_dependencies(${PROJECT_NAME}
     geometry_msgs
+    std_msgs
     nav_msgs
     sensor_msgs
     pcl_conversions

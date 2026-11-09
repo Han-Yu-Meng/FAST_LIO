@@ -41,6 +41,10 @@ public:
 
     register_output<pcl::PointCloud<pcl::PointXYZI>::Ptr>("cloud");
     register_output<pcl::PointCloud<pcl::PointXYZI>::Ptr>("cloud_body");
+    register_input<geometry_msgs::msg::TransformStamped>("initial_alignment", &FastLIO::on_initial_alignment);
+    register_output<geometry_msgs::msg::TransformStamped>("$T_{map}^{odom}$");
+    register_output<geometry_msgs::msg::PoseWithCovarianceStamped>("localization_pose");
+    register_output<std_msgs::msg::String>("localization_status");
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
     register_output<geometry_msgs::msg::TransformStamped>("$T_{odom}^{base}$");
@@ -74,6 +78,10 @@ public:
   void reset() override {
     pause();
     mapper_.reset();
+  }
+
+  void on_initial_alignment(const geometry_msgs::msg::TransformStamped &msg) {
+    if (mapper_) { mapper_->queue_initial_alignment(msg); notify_backend(); }
   }
 
   void on_transform(const geometry_msgs::msg::TransformStamped &msg) {

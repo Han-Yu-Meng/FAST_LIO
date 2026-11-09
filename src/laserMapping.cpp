@@ -53,6 +53,10 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <pcl/common/transforms.h>
+#include <limits>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -95,6 +99,70 @@ int imu_window_size = 200;
 std::deque<Eigen::Vector3d> imu_ang_vel_window_;
 Eigen::Vector3d avg_ang_vel_ = Eigen::Vector3d::Zero();
 
+// ---- 定位模式 IMU 高频输出（开关默认开） ----
+// fixed_map 定位时，kf_copy 同时被 IMU 回调线程（process_and_publish_imu_odometry
+// 里 predict / get_x）与后端 mapping 线程（kf_copy = kf）访问。用一把锁保护
+// kf_copy 及高频发布要读的共享状态快照，消除两线程间的数据竞争。
+bool imu_rate_output_ = true;          // FastLIO.localization.imu_rate_output，默认 true
+std::mutex kf_copy_mutex;
+// 高频发布需要的共享状态，由后端线程在锁内刷新，IMU 线程在锁内拷贝后使用：
+struct ImuRateSnapshot {
+    bool fixed_map_enabled = false;
+    bool locked = false;               // fixed_map_active && LOCKED && bad_matches==0
+    // 是否启用 IMU 高频输出。建图模式恒 true（沿用旧行为）；定位模式仅 LOCKED
+    // 之后为 true——初始化/未 LOCKED 期间必须保持 scan-rate，否则 BBS 依赖的
+    // $T_{odom}^{base}$ TF 时间戳会被 IMU 时间戳顶掉，导致永远 WAITING_INITIALIZATION。
+    bool imu_rate_live = false;
+    Eigen::Isometry3d map_to_odom = Eigen::Isometry3d::Identity();
+    M3D base_R_lidar = Eye3d;
+    V3D base_T_lidar = Zero3d;
+};
+ImuRateSnapshot imu_rate_snapshot;
+
+// 组装 map 系下带 6x6 协方差的定位位姿消息。
+// scan-rate 路径传 kf.get_x()/get_P()，IMU 高频路径传 kf_copy 的副本，
+// 两条路径共用同一套位姿/协方差公式，避免不一致。定义在文件前部，供两处调用。
+template <typename CovT>
+geometry_msgs::msg::PoseWithCovarianceStamped compose_localization_pose(
+    const state_ikfom &s, const CovT &P,
+    const Eigen::Isometry3d &map_to_odom_,
+    const M3D &R_bl, const V3D &t_bl,
+    const fins::AcqTime &ts)
+{
+    const M3D R = s.rot.toRotationMatrix();
+    const M3D R_L_I = s.offset_R_L_I.toRotationMatrix();
+    const V3D lever = R_L_I * (-R_bl.transpose() * t_bl) + s.offset_T_L_I;
+    Eigen::Isometry3d odom_base = Eigen::Isometry3d::Identity();
+    odom_base.linear() = R_bl * R * R_L_I * R_bl.transpose();
+    odom_base.translation() = R_bl * (R * lever + s.pos) + t_bl;
+    Eigen::Isometry3d global = map_to_odom_ * odom_base;
+
+    geometry_msgs::msg::PoseWithCovarianceStamped msg;
+    msg.header.stamp = fins::to_ros_msg_time(ts);
+    msg.header.frame_id = "map";
+    msg.pose.pose.position.x = global.translation().x();
+    msg.pose.pose.position.y = global.translation().y();
+    msg.pose.pose.position.z = global.translation().z();
+    Eigen::Quaterniond q(global.linear());
+    msg.pose.pose.orientation.w = q.w();
+    msg.pose.pose.orientation.x = q.x();
+    msg.pose.pose.orientation.y = q.y();
+    msg.pose.pose.orientation.z = q.z();
+
+    Eigen::Matrix<double,6,23> J = Eigen::Matrix<double,6,23>::Zero();
+    M3D R_map_world = map_to_odom_.linear() * R_bl;
+    J.block<3,3>(0,0) = R_map_world;
+    M3D lever_cross;
+    lever_cross << SKEW_SYM_MATRX(lever);
+    J.block<3,3>(0,3) = -R_map_world * R * lever_cross;
+    J.block<3,3>(3,3) = R_map_world * R;
+    Eigen::Matrix<double,6,6> covariance = J * P * J.transpose();
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            msg.pose.covariance[r*6+c] = covariance(r,c);
+    return msg;
+}
+
 vector<vector<int>>  pointSearchInd_surf; 
 vector<BoxPointType> cub_needrm;
 vector<PointVector>  Nearest_Points; 
@@ -118,7 +186,20 @@ PointCloudXYZI::Ptr corr_normvect{new PointCloudXYZI(30000, 1)};
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-KD_TREE<PointType> ikdtree;
+std::unique_ptr<KD_TREE<PointType>> ikdtree{new KD_TREE<PointType>()};
+std::unique_ptr<KD_TREE<PointType>> fixed_tree;
+PointCloudXYZI::Ptr prior_map{new PointCloudXYZI()};
+bool fixed_map_enabled = false, fixed_map_active = false;
+bool has_alignment = false, alignment_pending = false;
+std::mutex alignment_mutex;
+geometry_msgs::msg::TransformStamped pending_alignment;
+Eigen::Isometry3d map_to_odom = Eigen::Isometry3d::Identity();
+std::string tracking_status = "WAITING_INITIALIZATION";
+int bad_matches = 0, good_matches = 0;
+int min_effective_points = 30, failures_before_lost = 5, good_frames_to_lock = 3;
+double max_mean_residual = 0.2, max_update_translation = 0.3, max_update_rotation_deg = 10.0;
+double max_alignment_age = 10.0;
+
 
 V3F XAxisPoint_body{LIDAR_SP_LEN, 0.0, 0.0}, XAxisPoint_world{LIDAR_SP_LEN, 0.0, 0.0};
 V3D euler_cur;
@@ -210,7 +291,7 @@ void RGBpointBodyLidarToBase(PointType const * const pi, PointType * const po)
 void points_cache_collect()
 {
     PointVector points_history;
-    ikdtree.acquire_removed_points(points_history);
+    ikdtree->acquire_removed_points(points_history);
 }
 
 BoxPointType LocalMap_Points;
@@ -257,7 +338,7 @@ void lasermap_fov_segment()
 
     points_cache_collect();
     if(cub_needrm.size() > 0) {
-        ikdtree.Delete_Point_Boxes(cub_needrm);
+        ikdtree->Delete_Point_Boxes(cub_needrm);
     }
 }
 
@@ -332,8 +413,33 @@ void process_and_publish_imu_odometry(
 ) {
     if (!use_imu_odometry) return;
 
-    kf_copy.predict(dt, p_imu->Q, in);
-    auto imu_state = kf_copy.get_x();
+    // kf_copy 同时被本 IMU 回调线程与后端 mapping 线程（kf_copy = kf）访问，
+    // 必须在同一把锁内完成 predict / 取状态 / 取协方差 / 读定位快照 / 组装消息。
+    // 锁内只做纯 Eigen 矩阵运算（微秒级，无 I/O），锁外才发布，临界区极短。
+    state_ikfom imu_state;
+    bool pub_localization_pose = false;
+    geometry_msgs::msg::PoseWithCovarianceStamped loc_msg;
+    {
+        std::lock_guard<std::mutex> lock(kf_copy_mutex);
+        // 定位模式未 LOCKED 时不发布任何 IMU 频率的 odom/TF/localization_pose：
+        // 该阶段由 scan-rate 的 publish_lidar_odometry 独占输出，避免用 IMU 时间戳
+        // 覆盖 BBS 初始化所需的扫描时间戳 TF 配对（否则会卡在 WAITING_INITIALIZATION）。
+        // 建图模式（fixed_map_enabled=false）不受此限制，保持原有 IMU 高频行为。
+        bool imu_rate_gate = !imu_rate_snapshot.fixed_map_enabled
+                             || imu_rate_snapshot.imu_rate_live;
+        if (!imu_rate_gate) return;
+        kf_copy.predict(dt, p_imu->Q, in);
+        imu_state = kf_copy.get_x();
+        // fixed_map 定位且已 LOCKED：用 IMU 预测状态 + 常量 map->odom 外推，
+        // 让 /localization_pose 也达到 IMU 频率；协方差用 kf_copy 传播的 P。
+        pub_localization_pose = imu_rate_output_ && imu_rate_snapshot.fixed_map_enabled
+            && imu_rate_snapshot.locked && fins_node->required("localization_pose");
+        if (pub_localization_pose) {
+            loc_msg = compose_localization_pose(
+                imu_state, kf_copy.get_P(), imu_rate_snapshot.map_to_odom,
+                imu_rate_snapshot.base_R_lidar, imu_rate_snapshot.base_T_lidar, t);
+        }
+    }
 
     // 从IMU消息中获取原始角速度
     Eigen::Vector3d current_ang_vel(
@@ -403,8 +509,10 @@ void process_and_publish_imu_odometry(
     imu_odometry.twist.twist.angular.y = planar_constraint_ ? 0.0 : ang_vel_base(1);
     imu_odometry.twist.twist.angular.z = ang_vel_base(2);
 
-    // 发布里程计
+    // 发布里程计（IMU 频率）
     publish_imu_odometry(imu_odometry, t);
+    // 发布 map 系全局定位位姿（IMU 频率，仅 fixed_map 且 LOCKED 时）
+    if (pub_localization_pose) fins_node->send("localization_pose", loc_msg, t);
 }
 
 void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime t) 
@@ -444,6 +552,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in, fins::AcqTime 
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 
+    if (!use_imu_odometry_) return;
     if (p_imu->imu_need_init()) {
         return;
     }
@@ -566,8 +675,8 @@ void map_incremental()
         }
     }
 
-    ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    ikdtree->Add_Points(PointToAdd, true);
+    ikdtree->Add_Points(PointNoNeedDownsample, false);
 }
 
 void publish_frame_world(const fins::AcqTime &acq_time)
@@ -813,7 +922,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (ekfom_data.converge)
         {
             /** Find the closest surfaces in the map **/
-            ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            (fixed_map_active ? fixed_tree.get() : ikdtree.get())->Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
         }
 
@@ -844,8 +953,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     {
         if (point_selected_surf[i])
         {
-            laserCloudOri->points[effct_feat_num] = feats_down_body->points[i];
-            corr_normvect->points[effct_feat_num] = normvec->points[i];
+            laserCloudOri->push_back(feats_down_body->points[i]);
+            corr_normvect->push_back(normvec->points[i]);
             total_residual += res_last[i];
             effct_feat_num ++;
         }
@@ -918,6 +1027,114 @@ void update_transform(const geometry_msgs::msg::TransformStamped &msg)
     // fins_node->logger->info("Static transform from {} to {} updated.", msg.header.frame_id, msg.child_frame_id);
 }
 
+// Runs on the FINS input thread: defer all tree/filter operations to the backend.
+void queue_initial_alignment(const geometry_msgs::msg::TransformStamped &msg) {
+    std::lock_guard<std::mutex> lock(alignment_mutex);
+    pending_alignment = msg;
+    alignment_pending = true;
+}
+
+void publish_tracking_status(const fins::AcqTime &ts) {
+    if (!fixed_map_enabled) return;
+    std_msgs::msg::String msg;
+    msg.data = tracking_status;
+    fins_node->send("localization_status", msg, ts);
+}
+
+void lose_tracking(const fins::AcqTime &ts) {
+    fixed_map_active = false;
+    good_matches = bad_matches = 0;
+    tracking_status = "LOST";
+    // A new temporary local map is needed for fresh BBS accumulation. Destroying
+    // the old tree joins its rebuild worker; do not Build() over an active tree.
+    ikdtree.reset(new KD_TREE<PointType>());
+    Localmap_Initialized = false;
+    fins_node->logger->warn("[FixedMap] LOST; suppressing global pose, requesting BBS initialization");
+    publish_tracking_status(ts);
+}
+
+void reject_empty_scan(const fins::AcqTime &ts) {
+    if (!fixed_map_active) return;
+    good_matches = 0;
+    tracking_status = "DEGRADED";
+    if (++bad_matches >= failures_before_lost) lose_tracking(ts);
+    publish_tracking_status(ts);
+}
+
+void apply_pending_alignment(const fins::AcqTime &ts) {
+    if (!fixed_map_enabled) return;
+    geometry_msgs::msg::TransformStamped msg;
+    {
+        std::lock_guard<std::mutex> lock(alignment_mutex);
+        if (!alignment_pending) return;
+        msg = pending_alignment;
+        alignment_pending = false;
+    }
+    if (fixed_map_active) return;  // no periodic external correction while tracking
+    double age = fins::to_seconds(ts) - get_time_sec(msg.header.stamp);
+    Eigen::Quaterniond q(msg.transform.rotation.w, msg.transform.rotation.x,
+                         msg.transform.rotation.y, msg.transform.rotation.z);
+    V3D t(msg.transform.translation.x, msg.transform.translation.y, msg.transform.translation.z);
+    if (msg.header.frame_id != "map" || msg.child_frame_id != initial_frame ||
+        !q.coeffs().allFinite() || q.norm() < 1e-6 || !t.allFinite() ||
+        age < -0.1 || age > max_alignment_age || !static_transform_received) {
+        fins_node->logger->warn("[FixedMap] Rejected initialization: invalid frame/transform, missing extrinsics or age={}s", age);
+        tracking_status = "INITIALIZATION_REJECTED";
+        publish_tracking_status(ts);
+        tracking_status = "WAITING_INITIALIZATION";
+        return;
+    }
+    Eigen::Isometry3d alignment = Eigen::Isometry3d::Identity();
+    alignment.linear() = q.normalized().toRotationMatrix();
+    alignment.translation() = t;
+    // Existing FAST-LIO publishes odom points as B * p_internal, where B is
+    // base->lidar. Express the immutable prior in that SAME internal world:
+    // p_internal = B^-1 * (map->odom)^-1 * p_map.
+    // The EKF state, velocity, gravity, covariance and IMU history stay intact.
+    Eigen::Isometry3d B = Eigen::Isometry3d::Identity();
+    B.linear() = base_R_lidar; B.translation() = base_T_lidar;
+    PointCloudXYZI local_prior;
+    pcl::transformPointCloud(*prior_map, local_prior, (B.inverse()*alignment.inverse()).matrix().cast<float>());
+    auto tree = std::make_unique<KD_TREE<PointType>>();
+    tree->Build(local_prior.points);
+    fixed_tree = std::move(tree);
+    map_to_odom = alignment;
+    has_alignment = true;
+    fixed_map_active = true;
+    good_matches = bad_matches = 0;
+    tracking_status = "TRACKING";
+    fins_node->logger->info("[FixedMap] Initialized fixed prior: {} points, alignment age {:.3f}s; periodic GICP disabled", prior_map->size(), age);
+    publish_tracking_status(ts);
+}
+
+void publish_fixed_pose(const fins::AcqTime &ts) {
+    if (!fixed_map_enabled) return;
+    publish_tracking_status(ts);
+    // Keep the existing single-parent TF tree. This transform stays constant
+    // throughout tracking; corrections now enter the scan-to-map EKF itself.
+    if (has_alignment) {
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp = fins::to_ros_msg_time(ts);
+        tf.header.frame_id = "map"; tf.child_frame_id = initial_frame;
+        tf.transform.translation.x = map_to_odom.translation().x();
+        tf.transform.translation.y = map_to_odom.translation().y();
+        tf.transform.translation.z = map_to_odom.translation().z();
+        Eigen::Quaterniond q(map_to_odom.linear());
+        tf.transform.rotation.w=q.w(); tf.transform.rotation.x=q.x();
+        tf.transform.rotation.y=q.y(); tf.transform.rotation.z=q.z();
+        fins_node->send("$T_{map}^{odom}$", tf, ts);
+    }
+    // 仅当 IMU 高频真正生效（LOCKED，imu_rate_live）时，localization_pose 才由
+    // IMU 回调按 IMU 频率发布，这里跳过 scan-rate 版本避免同一话题两种频率。
+    // 未 LOCKED / DEGRADED / LOST 期间 imu_rate_live=false，IMU 回调不发布，
+    // 此时保留 scan-rate 路径，保持与旧版一致（不出现发布空窗）。
+    if (imu_rate_snapshot.imu_rate_live) return;
+    if (!fixed_map_active || tracking_status != "LOCKED" || bad_matches != 0) return;
+    auto msg = compose_localization_pose(state_point, kf.get_P(), map_to_odom,
+                                         base_R_lidar, base_T_lidar, ts);
+    fins_node->send("localization_pose", msg, ts);
+}
+
 void initialize() {
     fins_node->logger->info("User Initialization Start");
 
@@ -939,6 +1156,28 @@ void initialize() {
                             .with_description("cube side length")
                             .greater_than(0.00);
 
+    fins::ParamLoader localization("FastLIO.localization");
+    fixed_map_enabled = localization.get("enabled", false).with_description("Track immutable prior map after BBS initialization");
+    min_effective_points = localization.get("min_effective_points", 30).greater_than(5);
+    max_mean_residual = localization.get("max_mean_residual", 0.2).greater_than(0.0);
+    max_update_translation = localization.get("max_update_translation", 0.3).greater_than(0.0);
+    max_update_rotation_deg = localization.get("max_update_rotation_deg", 10.0).greater_than(0.0);
+    failures_before_lost = localization.get("failures_before_lost", 5).greater_than(0);
+    good_frames_to_lock = localization.get("good_frames_to_lock", 3).greater_than(0);
+    max_alignment_age = localization.get("max_alignment_age", 10.0).greater_than(0.0);
+    imu_rate_output_ = localization.get("imu_rate_output", true)
+                           .with_description("publish odometry/localization_pose at IMU rate in fixed-map localization");
+    if (fixed_map_enabled) {
+        std::string map_path = localization.get("map_path", std::string(""));
+        double leaf = localization.get("map_leaf_size", 0.15).greater_than(0.0);
+        PointCloudXYZI::Ptr raw(new PointCloudXYZI());
+        if (pcl::io::loadPCDFile(map_path, *raw) < 0) throw std::runtime_error("FixedMap: cannot load prior " + map_path);
+        PointCloudXYZI::Ptr clean(new PointCloudXYZI());
+        for (const auto &point : raw->points) if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) clean->push_back(point);
+        pcl::VoxelGrid<PointType> filter;
+        filter.setLeafSize(leaf,leaf,leaf); filter.setInputCloud(clean); filter.filter(*prior_map);
+        if (prior_map->size() < 100) throw std::runtime_error("FixedMap: prior has fewer than 100 valid points");
+    }
     fins::ParamLoader common("FastLIO.common");
 
     initial_frame = common.get("initial_frame", "odom")
@@ -963,6 +1202,15 @@ void initialize() {
     planar_constraint_ = common.get("planar_constraint", false)
                                 .with_description("force planar output: roll=0, pitch=0, z=0");
 
+    if (fixed_map_enabled) {
+        // 平面约束沿用旧行为（定位不做强制平面归零）。
+        planar_constraint_ = false;
+        // 定位模式默认开启 IMU 高频输出：/Odometry、odom->base TF、
+        // /localization_pose 都按 IMU 频率发布。kf_copy 已由 kf_copy_mutex
+        // 保护，不再需要为了规避并发而关闭异步 IMU 预测。
+        // 开关关闭时退回旧的 scan-rate(10Hz) 行为，完全等价于旧版。
+        if (!imu_rate_output_) use_imu_odometry_ = false;
+    }
     imu_window_size = common.get("imu_window_size", 10)
                             .with_description("imu window size")
                             .greater_than(0);
@@ -1023,6 +1271,7 @@ void initialize() {
 
     extrinsic_est_en = mapping.get("extrinsic_est_en", false)
                               .with_description("enable extrinsic estimation");
+    if (fixed_map_enabled) extrinsic_est_en = false;
     extrinT = mapping.get("extrinsic_T", std::vector<double>{-0.011, -0.02329, 0.04412})
                .with_description("extrinsic translation");
     extrinR = mapping.get("extrinsic_R", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1})
@@ -1069,6 +1318,7 @@ void loop_once() {
             return ;
         }
         
+        apply_pending_alignment(Measures.acq_time);
         double t0;
         {
             auto t = fins_node->recorder("preprocessing", Measures.acq_time);
@@ -1080,6 +1330,7 @@ void loop_once() {
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 fins_node->logger->warn("No point, skip this scan!");
+                reject_empty_scan(Measures.acq_time);
                 return ;
             }
         }
@@ -1089,24 +1340,24 @@ void loop_once() {
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
             /*** Segment the map in lidar FOV ***/
-            lasermap_fov_segment();
+            if (!fixed_map_active) lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
             downSizeFilterSurf.setInputCloud(feats_undistort);
             downSizeFilterSurf.filter(*feats_down_body);
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
-            if(ikdtree.Root_Node == nullptr)
+            if(!fixed_map_active && ikdtree->Root_Node == nullptr)
             {
                 if(feats_down_size > 5)
                 {
-                    ikdtree.set_downsample_param(filter_size_map_min);
+                    ikdtree->set_downsample_param(filter_size_map_min);
                     feats_down_world->resize(feats_down_size);
                     for(int i = 0; i < feats_down_size; i++)
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
-                    ikdtree.Build(feats_down_world->points);
+                    ikdtree->Build(feats_down_world->points);
                 }
                 return ;
             }
@@ -1115,9 +1366,15 @@ void loop_once() {
             if (feats_down_size < 5)
             {
                 fins_node->logger->warn("No point, skip this scan!");
+                reject_empty_scan(Measures.acq_time);
                 return ;
             }
             
+            if (feats_down_size > 100000) {
+                feats_down_body->resize(100000); feats_down_size = 100000;
+            }
+            laserCloudOri->resize(feats_down_size);
+            corr_normvect->resize(feats_down_size);
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
 
@@ -1130,8 +1387,30 @@ void loop_once() {
         {
             auto t = fins_node->recorder("state_estimation", Measures.acq_time);
             t_update_start = omp_get_wtime();
+            auto predicted_state = kf.get_x();
+            auto predicted_covariance = kf.get_P();
+            effct_feat_num = 0;
+            res_mean_last = std::numeric_limits<double>::infinity();
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV);
             state_point = kf.get_x();
+            if (fixed_map_active) {
+                const double jump = (state_point.pos-predicted_state.pos).norm();
+                const double turn = SO3::log(predicted_state.rot.conjugate()*state_point.rot).norm()*180.0/M_PI;
+                bool valid = effct_feat_num >= min_effective_points && std::isfinite(res_mean_last) &&
+                    res_mean_last <= max_mean_residual && state_point.pos.allFinite() &&
+                    std::isfinite(turn) && jump <= max_update_translation && turn <= max_update_rotation_deg;
+                if (!valid) {
+                    kf.change_x(predicted_state); kf.change_P(predicted_covariance); state_point = predicted_state;
+                    good_matches = 0; ++bad_matches;
+                    tracking_status = "DEGRADED";
+                    fins_node->logger->warn("[FixedMap] Rejected update: features={} residual={} step={} angle={} failures={}",
+                        effct_feat_num, res_mean_last, jump, turn, bad_matches);
+                    if (bad_matches >= failures_before_lost) lose_tracking(Measures.acq_time);
+                } else {
+                    bad_matches = 0;
+                    tracking_status = ++good_matches >= good_frames_to_lock ? "LOCKED" : "TRACKING";
+                }
+            }
             t_update_end = omp_get_wtime();
 
             euler_cur = SO3ToEuler(state_point.rot);
@@ -1141,23 +1420,53 @@ void loop_once() {
             geoQuat.z = state_point.rot.coeffs()[2];
             geoQuat.w = state_point.rot.coeffs()[3];
 
-            if (use_imu_odometry_) {
-                kf_copy = kf;
+            {
+                // 与 IMU 回调共用 kf_copy_mutex：同步滤波器副本 + 刷新高频定位快照。
+                // 快照字段无条件刷新（不依赖 use_imu_odometry_），避免 IMU 回调的
+                // gate 隐含依赖别处的返回前置条件。kf_copy=kf 仅在启用时同步。
+                std::lock_guard<std::mutex> lock(kf_copy_mutex);
+                if (use_imu_odometry_) kf_copy = kf;
+                imu_rate_snapshot.fixed_map_enabled = fixed_map_enabled;
+                imu_rate_snapshot.locked = (fixed_map_active &&
+                                            tracking_status == "LOCKED" && bad_matches == 0);
+                // 定位模式仅 LOCKED 后才启用 IMU 高频。初始化/未 LOCKED/LOST 期间
+                // 必须保持 scan-rate：BBS 初始化的 on_cloud_callback 依赖
+                // $T_{odom}^{base}$ TF 与 /cloud_registered 相同的扫描时间戳配对，
+                // 只有 publish_lidar_odometry(Measures.acq_time) 能满足；若此时改用
+                // IMU 时间戳发 TF，配对永远失败，会卡死在 WAITING_INITIALIZATION。
+                imu_rate_snapshot.imu_rate_live = use_imu_odometry_ && imu_rate_output_
+                    && fixed_map_enabled && fixed_map_active
+                    && tracking_status == "LOCKED" && bad_matches == 0;
+                imu_rate_snapshot.map_to_odom = map_to_odom;
+                imu_rate_snapshot.base_R_lidar = base_R_lidar;
+                imu_rate_snapshot.base_T_lidar = base_T_lidar;
             }
         }
 
         /******* Publish odometry *******/
-        if (!use_imu_odometry_) {
+        // scan-rate 路径在两种情况下必须保留：
+        //   1) 配置关闭 IMU odom（!use_imu_odometry_）；
+        //   2) 定位模式尚未 LOCKED（BBS 初始化依赖扫描时间戳的 odom->base TF）。
+        // LOCKED 后停掉 scan-rate，交由 IMU 回调按 IMU 频率发布。
+        if (!use_imu_odometry_
+            || (fixed_map_enabled && !imu_rate_snapshot.imu_rate_live)) {
             publish_lidar_odometry(Measures.acq_time);
         }
         publish_path(Measures.acq_time);
+        publish_fixed_pose(Measures.acq_time);
 
         /*** add the feature points to map kdtree ***/
         double t_incre_start, t_incre_end;
         {
             auto t = fins_node->recorder("map_incremental", Measures.acq_time);
             t_incre_start = omp_get_wtime();
-            map_incremental();
+            if (!fixed_map_active) {
+                if (ikdtree->Root_Node == nullptr) {
+                    PointVector seed;
+                    for (const auto &point : feats_down_body->points) { PointType world; pointBodyToWorld(&point, &world); seed.push_back(world); }
+                    ikdtree->set_downsample_param(filter_size_map_min); ikdtree->Build(seed);
+                } else map_incremental();
+            }
             t_incre_end = omp_get_wtime();
         }
         
