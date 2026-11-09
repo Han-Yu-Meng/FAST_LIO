@@ -45,6 +45,7 @@ public:
     register_output<geometry_msgs::msg::TransformStamped>("$T_{map}^{odom}$");
     register_output<geometry_msgs::msg::PoseWithCovarianceStamped>("localization_pose");
     register_output<std_msgs::msg::String>("localization_status");
+    register_output<std_msgs::msg::Float64>("localization_confidence");
     register_output<nav_msgs::msg::Path>("path");
     register_output<nav_msgs::msg::Odometry>("odometry");
     register_output<geometry_msgs::msg::TransformStamped>("$T_{odom}^{base}$");

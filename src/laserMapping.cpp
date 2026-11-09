@@ -34,6 +34,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 #include <omp.h>
 #include <mutex>
+#include <algorithm>
 #include <math.h>
 #include <thread>
 #include <fstream>
@@ -55,6 +56,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <pcl/common/transforms.h>
 #include <limits>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -199,6 +201,16 @@ int bad_matches = 0, good_matches = 0;
 int min_effective_points = 30, failures_before_lost = 5, good_frames_to_lock = 3;
 double max_mean_residual = 0.2, max_update_translation = 0.3, max_update_rotation_deg = 10.0;
 double max_alignment_age = 10.0;
+
+// ---- 定位置信度 [0,1]（std_msgs/Float64 /localization_confidence）----
+// 由本帧 scan-to-map 匹配的现成指标加权合成，复用上面的质量门限做归一化分母
+// （1 表示「离门限越远越好」），再乘状态系数并做非对称 EMA：变差快速下降、
+// 恢复平滑上升。非 fixed_map / 未 LOCKED 归零，供下游判断位姿是否可信。
+double localization_confidence_ = 0.0;
+double conf_jump_ = 0.0, conf_turn_ = 0.0;   // 质量门控块内的本帧跳变，供发布读取
+bool   conf_has_quality_ = false;            // 是否已跑过一次质量门控
+static constexpr double kConfAlphaUp = 0.2;  // 上升（恢复）平滑系数
+static constexpr double kConfAlphaDown = 0.5;// 下降（退化）平滑系数，下降更快
 
 
 V3F XAxisPoint_body{LIDAR_SP_LEN, 0.0, 0.0}, XAxisPoint_world{LIDAR_SP_LEN, 0.0, 0.0};
@@ -1135,6 +1147,48 @@ void publish_fixed_pose(const fins::AcqTime &ts) {
     fins_node->send("localization_pose", msg, ts);
 }
 
+// 发布定位置信度 [0,1]。仅用现成的 scan-to-map 匹配指标与状态，无新增传感器量。
+// 归一化分母直接复用质量门限：点数 >= min_effective_points 记满分；残差/平移跳变/
+// 转角相对各自门限越小分越高；连续有效帧按 good_frames_to_lock 计。状态系数使
+// 未 LOCKED 不到满值、DEGRADED/LOST/WAITING 直接归零。
+void publish_localization_confidence(const fins::AcqTime &ts) {
+    if (!fins_node->required("localization_confidence")) return;
+
+    auto clamp01 = [](double x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); };
+    double target = 0.0;
+    if (fixed_map_enabled && conf_has_quality_) {
+        if (tracking_status == "LOCKED" || tracking_status == "TRACKING") {
+            // 指标可能因空扫描/EKF 发散而是 inf/NaN，先做有限性保护，别让置信度变 NaN
+            double feat   = std::isfinite(double(effct_feat_num)) ? double(effct_feat_num) : 0.0;
+            double res    = std::isfinite(res_mean_last) ? res_mean_last : max_mean_residual;
+            double jump   = std::isfinite(conf_jump_) ? conf_jump_ : max_update_translation;
+            double turn   = std::isfinite(conf_turn_) ? conf_turn_ : max_update_rotation_deg;
+            double f_feat   = clamp01(feat / std::max(1, min_effective_points));
+            double f_res    = clamp01(1.0 - res / std::max(1e-6, max_mean_residual));
+            double f_jump   = clamp01(1.0 - jump / std::max(1e-6, max_update_translation));
+            double f_turn   = clamp01(1.0 - turn / std::max(1e-6, max_update_rotation_deg));
+            double f_streak = clamp01(double(good_matches) /
+                                      std::max(1, good_frames_to_lock));
+            double quality = 0.25 * f_feat + 0.30 * f_res + 0.15 * f_jump
+                           + 0.15 * f_turn + 0.15 * f_streak;
+            // LOCKED 才给满权重；TRACKING 打折，反映尚未稳定
+            double state_factor = (tracking_status == "LOCKED") ? 1.0 : 0.6;
+            target = clamp01(quality) * state_factor;
+        }
+        // DEGRADED / LOST / WAITING_INITIALIZATION / INITIALIZATION_REJECTED -> 0
+    }
+
+    // 非对称 EMA：退化/失锁时快速掉到 0，恢复时平滑爬升，避免逐帧抖动
+    double alpha = (target < localization_confidence_) ? kConfAlphaDown : kConfAlphaUp;
+    localization_confidence_ += alpha * (target - localization_confidence_);
+    if (localization_confidence_ < 1e-3) localization_confidence_ = 0.0;
+    if (localization_confidence_ > 1.0)  localization_confidence_ = 1.0;
+
+    std_msgs::msg::Float64 msg;
+    msg.data = localization_confidence_;
+    fins_node->send("localization_confidence", msg, ts);
+}
+
 void initialize() {
     fins_node->logger->info("User Initialization Start");
 
@@ -1310,6 +1364,9 @@ void initialize() {
 
 void loop_once() {
     if(sync_packages(Measures))  {
+        // 每帧必达（含所有 early-return 分支之前），保证置信度持续更新；
+        // 用截至上一帧质量门控的指标，scan-rate 发布，滞后一帧可接受。
+        publish_localization_confidence(Measures.acq_time);
         if (flg_first_scan)
         {
             first_lidar_time = Measures.lidar_beg_time;
@@ -1396,6 +1453,10 @@ void loop_once() {
             if (fixed_map_active) {
                 const double jump = (state_point.pos-predicted_state.pos).norm();
                 const double turn = SO3::log(predicted_state.rot.conjugate()*state_point.rot).norm()*180.0/M_PI;
+                // 供下一帧 publish_localization_confidence 读取（本帧跳变指标）
+                conf_jump_ = jump;
+                conf_turn_ = turn;
+                conf_has_quality_ = true;
                 bool valid = effct_feat_num >= min_effective_points && std::isfinite(res_mean_last) &&
                     res_mean_last <= max_mean_residual && state_point.pos.allFinite() &&
                     std::isfinite(turn) && jump <= max_update_translation && turn <= max_update_rotation_deg;
