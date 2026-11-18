@@ -15,7 +15,7 @@ using namespace std;
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
-enum LID_TYPE{AVIA = 1, VELO16, OUST64, MARSIM}; //{1, 2, 3}
+enum LID_TYPE{AVIA = 1, VELO16, OUST64, MARSIM, RSM1, RSAIRY}; //{1, 2, 3, 4, 5, 6}
 enum TIME_UNIT{SEC = 0, MS = 1, US = 2, NS = 3};
 enum Feature{Nor, Poss_Plane, Real_Plane, Edge_Jump, Edge_Plane, Wire, ZeroPoint};
 enum Surround{Prev, Next};
@@ -102,12 +102,15 @@ class Preprocess
   vector<orgtype> typess[128]; //maximum 128 line lidar
   float time_unit_scale;
   int lidar_type, point_filter_num, N_SCANS, SCAN_RATE, time_unit;
-  double blind;
+  double blind, det_range, max_height;
   bool feature_enabled, given_offset_time;
+  bool msg_is_XYZIRT{false};
 
   private:
   void avia_handler(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg);
   void oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+  void robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+  void robosenseAiry_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void sim_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);

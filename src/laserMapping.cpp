@@ -614,7 +614,7 @@ bool sync_packages(MeasureGroup &meas)
             lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
             lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
         }
-        if(lidar_type == MARSIM)
+        if(lidar_type == MARSIM || (lidar_type == RSAIRY && !p_pre->msg_is_XYZIRT))
             lidar_end_time = meas.lidar_beg_time;
 
         meas.lidar_end_time = lidar_end_time;
@@ -1273,22 +1273,27 @@ void initialize() {
                                .with_description("imu time tolerance")
                                .greater_than(0.00);
 
+    std::string dataset = common.get("dataset", std::string("mid360"))
+                                  .with_description("sensor dataset: mid360 (Livox) or airy (RoboSense Airy)");
+    const bool airy = (dataset == "airy");
+    if (airy) fins_node->logger->info("dataset=airy: RoboSense Airy defaults active");
+
     fins::ParamLoader preprocess("FastLIO.preprocess");
 
     p_pre->blind = preprocess.get("blind", 0.5)
                              .with_description("blind radius")
                              .greater_than(0.0);
 
-    p_pre->lidar_type = preprocess.get<int>("lidar_type", AVIA)
-                             .with_description("AVIA = 1, VELO16 = 2, OUST64 = 3, MARSIM = 4")
-                             .one_of({LID_TYPE::AVIA, LID_TYPE::VELO16, LID_TYPE::OUST64, LID_TYPE::MARSIM});
+    p_pre->lidar_type = preprocess.get<int>("lidar_type", airy ? RSAIRY : AVIA)
+                             .with_description("AVIA = 1, VELO16 = 2, OUST64 = 3, MARSIM = 4, RSM1 = 5, RSAIRY = 6")
+                             .one_of({LID_TYPE::AVIA, LID_TYPE::VELO16, LID_TYPE::OUST64, LID_TYPE::MARSIM, LID_TYPE::RSM1, LID_TYPE::RSAIRY});
     lidar_type = p_pre->lidar_type;
 
     p_pre->N_SCANS = preprocess.get("scan_line", 16)
                                .with_description("scan line")
                                .greater_than(0);
 
-    p_pre->time_unit = preprocess.get<int>("timestamp_unit", US)
+    p_pre->time_unit = preprocess.get<int>("timestamp_unit", airy ? SEC : US)
                              .with_description("SEC = 0, MS = 1, US = 2, NS = 3")
                              .one_of({TIME_UNIT::SEC, TIME_UNIT::MS, TIME_UNIT::US, TIME_UNIT::NS});
 
@@ -1302,6 +1307,16 @@ void initialize() {
     p_pre->point_filter_num = preprocess.get("point_filter_num", 2)
                                .with_description("point filter number")
                                .greater_than(0);
+
+    p_pre->det_range = preprocess.get("det_range", 100.0)
+                                 .with_description("max range gate for RoboSense clouds")
+                                 .greater_than(0.0);
+
+    p_pre->max_height = preprocess.get("max_height", 5.0)
+                                 .with_description("z upper bound (lidar frame) for Airy XYZI flash clouds");
+
+    p_imu->deskew_en = preprocess.get("deskew_en", true)
+                               .with_description("per-point deskewing (disable for solid-state flash clouds)");
 
     fins::ParamLoader mapping("FastLIO.mapping");
     acc_cov = mapping.get("acc_cov", 0.1)
@@ -1326,9 +1341,18 @@ void initialize() {
     extrinsic_est_en = mapping.get("extrinsic_est_en", false)
                               .with_description("enable extrinsic estimation");
     if (fixed_map_enabled) extrinsic_est_en = false;
-    extrinT = mapping.get("extrinsic_T", std::vector<double>{-0.011, -0.02329, 0.04412})
+    // yaml 中的 vector 参数不会被 agent 加载进参数服务器（fins SDK 既有行为，
+    // mid360 因代码默认值即正确标定而从未暴露）。airy 的 IMU->lidar 轴交换
+    // 标定只能做进代码默认值；显式设置的标量键仍可覆盖。
+    extrinT = mapping.get("extrinsic_T",
+                  airy ? std::vector<double>{0.004250, 0.004180, -0.004460}
+                       : std::vector<double>{-0.011, -0.02329, 0.04412})
                .with_description("extrinsic translation");
-    extrinR = mapping.get("extrinsic_R", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1})
+    extrinR = mapping.get("extrinsic_R",
+                  airy ? std::vector<double>{0.0033883, -0.99997669, 0.00592802,
+                                             -0.99999315, -0.00339705, -0.00146638,
+                                             0.00148648, -0.00592301, -0.99998135}
+                       : std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1})
                .with_description("extrinsic rotation");
     
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
@@ -1457,6 +1481,9 @@ void loop_once() {
                 conf_jump_ = jump;
                 conf_turn_ = turn;
                 conf_has_quality_ = true;
+                fins_node->logger->info("[FixedMapDbg] t={:.3f} f={} r={:.4f} j={:.4f} a={:.3f} p=({:.3f},{:.3f},{:.3f})",
+                    Measures.lidar_end_time, effct_feat_num, res_mean_last, jump, turn,
+                    state_point.pos.x(), state_point.pos.y(), state_point.pos.z());
                 bool valid = effct_feat_num >= min_effective_points && std::isfinite(res_mean_last) &&
                     res_mean_last <= max_mean_residual && state_point.pos.allFinite() &&
                     std::isfinite(turn) && jump <= max_update_translation && turn <= max_update_rotation_deg;

@@ -56,6 +56,7 @@ class ImuProcess
   V3D cov_bias_acc;
   double first_lidar_time;
   int lidar_type;
+  bool deskew_en = true;
 
   bool imu_need_init() { return imu_need_init_; }
   V3D get_mean_acc() { return mean_acc; }
@@ -299,7 +300,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   /*** undistort each lidar point (backward propagation) ***/
   if (pcl_out.points.begin() == pcl_out.points.end()) return;
 
-  if(lidar_type != MARSIM){
+  if(deskew_en && lidar_type != MARSIM){
       auto it_pcl = pcl_out.points.end() - 1;
       for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
       {

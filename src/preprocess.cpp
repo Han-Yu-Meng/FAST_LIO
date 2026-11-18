@@ -1,10 +1,12 @@
 #include "preprocess.h"
+#include <pcl/filters/approximate_voxel_grid.h>
 
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
 
 Preprocess::Preprocess(fins::Node* fins_node_)
-  :fins_node(fins_node_), feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+  :fins_node(fins_node_), feature_enabled(0), lidar_type(AVIA), blind(0.01),
+   det_range(100.0), max_height(5.0), point_filter_num(1)
 {
   inf_bound = 10;
   N_SCANS   = 6;
@@ -81,7 +83,16 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &ms
   case MARSIM:
     sim_handler(msg);
     break;
-  
+
+  case RSM1:
+    msg_is_XYZIRT = true;
+    robosenseM1_handler(msg);
+    break;
+
+  case RSAIRY:
+    robosenseAiry_handler(msg);
+    break;
+
   default:
     fins_node->logger->error("Unsupported lidar type");
     break;
@@ -271,6 +282,162 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::ConstShared
       added_pt.normal_z = 0;
       added_pt.curvature = pl_orig.points[i].t * time_unit_scale; // curvature unit: ms
 
+      pl_surf.points.push_back(added_pt);
+    }
+  }
+}
+
+namespace {
+
+struct RsField { uint32_t offset = 0; uint8_t datatype = 0; bool found = false; };
+
+// UINT64/INT64 datatypes exist in rosbag data but have no named constants until ROS 2 Jazzy.
+constexpr uint8_t PF_UINT64 = 9;
+constexpr uint8_t PF_INT64  = 10;
+
+double rs_field_double(const uint8_t *addr, uint8_t datatype)
+{
+  switch (datatype) {
+    case sensor_msgs::msg::PointField::FLOAT32: { float    v; memcpy(&v, addr, sizeof(v)); return v; }
+    case sensor_msgs::msg::PointField::FLOAT64: { double   v; memcpy(&v, addr, sizeof(v)); return v; }
+    case sensor_msgs::msg::PointField::UINT8:   { uint8_t  v; memcpy(&v, addr, sizeof(v)); return v; }
+    case sensor_msgs::msg::PointField::INT8:    { int8_t   v; memcpy(&v, addr, sizeof(v)); return v; }
+    case sensor_msgs::msg::PointField::UINT16:  { uint16_t v; memcpy(&v, addr, sizeof(v)); return v; }
+    case sensor_msgs::msg::PointField::INT16:   { int16_t  v; memcpy(&v, addr, sizeof(v)); return v; }
+    case sensor_msgs::msg::PointField::UINT32:  { uint32_t v; memcpy(&v, addr, sizeof(v)); return v; }
+    case sensor_msgs::msg::PointField::INT32:   { int32_t  v; memcpy(&v, addr, sizeof(v)); return v; }
+    case PF_UINT64:  { uint64_t v; memcpy(&v, addr, sizeof(v)); return (double)v; }
+    case PF_INT64:   { int64_t  v; memcpy(&v, addr, sizeof(v)); return (double)v; }
+    default: return 0.0;
+  }
+}
+
+// rslidar SDK writes per-point time as absolute nanoseconds in a uint64 field
+// (packed at an unaligned offset, 26-byte point_step), which pcl::fromROSMsg
+// cannot deserialize into a plain struct — parse fields manually instead.
+double rs_field_time_sec(const uint8_t *addr, uint8_t datatype)
+{
+  double v = rs_field_double(addr, datatype);
+  if (datatype == sensor_msgs::msg::PointField::UINT32 ||
+      datatype == PF_UINT64)
+    v *= 1e-9;
+  return v;
+}
+
+void rs_find_fields(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg,
+                    RsField &fx, RsField &fy, RsField &fz, RsField &fi, RsField &ft)
+{
+  for (const auto &f : msg->fields) {
+    if (f.name == "x")       { fx.offset = f.offset; fx.datatype = f.datatype; fx.found = true; }
+    else if (f.name == "y")  { fy.offset = f.offset; fy.datatype = f.datatype; fy.found = true; }
+    else if (f.name == "z")  { fz.offset = f.offset; fz.datatype = f.datatype; fz.found = true; }
+    else if (f.name == "intensity") { fi.offset = f.offset; fi.datatype = f.datatype; fi.found = true; }
+    else if (f.name == "timestamp" || f.name == "time") { ft.offset = f.offset; ft.datatype = f.datatype; ft.found = true; }
+  }
+}
+
+} // namespace
+
+void Preprocess::robosenseM1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+  int plsize = msg->width * msg->height;
+  pl_corn.reserve(plsize);
+  pl_surf.reserve(plsize);
+
+  RsField fx, fy, fz, fi, ft;
+  rs_find_fields(msg, fx, fy, fz, fi, ft);
+  if (!fx.found || !fy.found || !fz.found || !ft.found) {
+    fins_node->logger->error("RSM1/RSAIRY: cloud missing x/y/z/timestamp fields, message dropped");
+    return;
+  }
+
+  double start_time = 0.0;
+  bool has_start = false;
+  const uint8_t *cloud_data = msg->data.data();
+  for (int i = 0; i < plsize; i++)
+  {
+    const uint8_t *base = cloud_data + i * msg->point_step;
+    double x = rs_field_double(base + fx.offset, fx.datatype);
+    double y = rs_field_double(base + fy.offset, fy.datatype);
+    double z = rs_field_double(base + fz.offset, fz.datatype);
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+
+    double pt_time = rs_field_time_sec(base + ft.offset, ft.datatype);
+    if (!has_start) { start_time = pt_time; has_start = true; }
+    if (i % point_filter_num != 0) continue;
+
+    double range = sqrt(x * x + y * y + z * z);
+    if (range < det_range && range > blind)
+    {
+      PointType added_pt;
+      added_pt.x = x;
+      added_pt.y = y;
+      added_pt.z = z;
+      added_pt.intensity = fi.found ? rs_field_double(base + fi.offset, fi.datatype) : 0;
+      added_pt.normal_x = 0;
+      added_pt.normal_y = 0;
+      added_pt.normal_z = 0;
+      added_pt.curvature = (pt_time - start_time) * time_unit_scale; // curvature unit: ms
+      pl_surf.points.push_back(added_pt);
+    }
+  }
+}
+
+void Preprocess::robosenseAiry_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
+{
+  static bool logged_xyzirt = false;
+  static bool logged_xyzI = false;
+
+  msg_is_XYZIRT = (msg->fields.size() >= 6);
+  if (msg_is_XYZIRT)
+  {
+    if (!logged_xyzirt) {
+      fins_node->logger->info("Airy cloud detected as XYZIRT (per-point timestamp)");
+      logged_xyzirt = true;
+    }
+    robosenseM1_handler(msg);
+    return;
+  }
+
+  if (!logged_xyzI) {
+    fins_node->logger->info("Airy cloud detected as XYZI (flash model)");
+    logged_xyzI = true;
+  }
+
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  pcl::PointCloud<pcl::PointXYZI>::Ptr pl_orig(new pcl::PointCloud<pcl::PointXYZI>());
+  pcl::fromROSMsg(*msg, *pl_orig);
+  if (pl_orig->points.empty()) return;
+
+  pcl::PointCloud<pcl::PointXYZI>::Ptr pl_down(new pcl::PointCloud<pcl::PointXYZI>());
+  pcl::ApproximateVoxelGrid<pcl::PointXYZI> voxel_filter;
+  voxel_filter.setInputCloud(pl_orig);
+  voxel_filter.setLeafSize(0.1f, 0.1f, 0.1f);
+  voxel_filter.filter(*pl_down);
+
+  pl_surf.reserve(pl_down->size());
+  for (const auto &ori_point : pl_down->points)
+  {
+    if (!std::isfinite(ori_point.x) || !std::isfinite(ori_point.y) || !std::isfinite(ori_point.z)) continue;
+    double range = sqrt(ori_point.x * ori_point.x + ori_point.y * ori_point.y + ori_point.z * ori_point.z);
+    bool height_valid = ori_point.z < max_height && ori_point.z > 0;
+    if (range < det_range && range > blind && height_valid)
+    {
+      PointType added_pt;
+      added_pt.x = ori_point.x;
+      added_pt.y = ori_point.y;
+      added_pt.z = ori_point.z;
+      added_pt.intensity = ori_point.intensity;
+      added_pt.normal_x = 0;
+      added_pt.normal_y = 0;
+      added_pt.normal_z = 0;
+      added_pt.curvature = 0.0;
       pl_surf.points.push_back(added_pt);
     }
   }
