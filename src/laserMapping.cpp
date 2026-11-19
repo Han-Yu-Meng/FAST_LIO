@@ -1481,9 +1481,9 @@ void loop_once() {
                 conf_jump_ = jump;
                 conf_turn_ = turn;
                 conf_has_quality_ = true;
-                fins_node->logger->info("[FixedMapDbg] t={:.3f} f={} r={:.4f} j={:.4f} a={:.3f} p=({:.3f},{:.3f},{:.3f})",
-                    Measures.lidar_end_time, effct_feat_num, res_mean_last, jump, turn,
-                    state_point.pos.x(), state_point.pos.y(), state_point.pos.z());
+                // fins_node->logger->info("[FixedMapDbg] t={:.3f} f={} r={:.4f} j={:.4f} a={:.3f} p=({:.3f},{:.3f},{:.3f})",
+                    // Measures.lidar_end_time, effct_feat_num, res_mean_last, jump, turn,
+                    // state_point.pos.x(), state_point.pos.y(), state_point.pos.z());
                 bool valid = effct_feat_num >= min_effective_points && std::isfinite(res_mean_last) &&
                     res_mean_last <= max_mean_residual && state_point.pos.allFinite() &&
                     std::isfinite(turn) && jump <= max_update_translation && turn <= max_update_rotation_deg;
