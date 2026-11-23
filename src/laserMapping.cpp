@@ -199,6 +199,7 @@ Eigen::Isometry3d map_to_odom = Eigen::Isometry3d::Identity();
 std::string tracking_status = "WAITING_INITIALIZATION";
 int bad_matches = 0, good_matches = 0;
 int min_effective_points = 30, failures_before_lost = 5, good_frames_to_lock = 3;
+bool reject_update_enabled = true;
 double max_mean_residual = 0.2, max_update_translation = 0.3, max_update_rotation_deg = 10.0;
 double max_alignment_age = 10.0;
 
@@ -1212,6 +1213,7 @@ void initialize() {
 
     fins::ParamLoader localization("FastLIO.localization");
     fixed_map_enabled = localization.get("enabled", false).with_description("Track immutable prior map after BBS initialization");
+    reject_update_enabled = localization.get("reject_update_enabled", true);
     min_effective_points = localization.get("min_effective_points", 30).greater_than(5);
     max_mean_residual = localization.get("max_mean_residual", 0.2).greater_than(0.0);
     max_update_translation = localization.get("max_update_translation", 0.3).greater_than(0.0);
@@ -1487,8 +1489,11 @@ void loop_once() {
                 // 配准质量只由残差和有效点数决定。状态修正量（jump/turn）包含真实运动与
                 // IMU 预测误差，不是匹配失败；用它当门限会把高速运动误判为 DEGRADED/LOST。
                 // jump/turn 仍计算并供 localization_confidence 作为软指标使用。
-                bool valid = effct_feat_num >= min_effective_points && std::isfinite(res_mean_last) &&
-                    res_mean_last <= max_mean_residual && state_point.pos.allFinite();
+                // reject_update_enabled=false 时完全关闭拒绝：任何帧都不回滚、不累计失败，
+                // 状态保持 IMU 预测（本帧无有效点则根本未执行 update），避免正确匹配被误判。
+                bool valid = !reject_update_enabled ||
+                    (effct_feat_num >= min_effective_points && std::isfinite(res_mean_last) &&
+                     res_mean_last <= max_mean_residual && state_point.pos.allFinite());
                 if (!valid) {
                     kf.change_x(predicted_state); kf.change_P(predicted_covariance); state_point = predicted_state;
                     good_matches = 0; ++bad_matches;
