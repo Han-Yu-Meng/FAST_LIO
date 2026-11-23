@@ -1484,15 +1484,17 @@ void loop_once() {
                 // fins_node->logger->info("[FixedMapDbg] t={:.3f} f={} r={:.4f} j={:.4f} a={:.3f} p=({:.3f},{:.3f},{:.3f})",
                     // Measures.lidar_end_time, effct_feat_num, res_mean_last, jump, turn,
                     // state_point.pos.x(), state_point.pos.y(), state_point.pos.z());
+                // 配准质量只由残差和有效点数决定。状态修正量（jump/turn）包含真实运动与
+                // IMU 预测误差，不是匹配失败；用它当门限会把高速运动误判为 DEGRADED/LOST。
+                // jump/turn 仍计算并供 localization_confidence 作为软指标使用。
                 bool valid = effct_feat_num >= min_effective_points && std::isfinite(res_mean_last) &&
-                    res_mean_last <= max_mean_residual && state_point.pos.allFinite() &&
-                    std::isfinite(turn) && jump <= max_update_translation && turn <= max_update_rotation_deg;
+                    res_mean_last <= max_mean_residual && state_point.pos.allFinite();
                 if (!valid) {
                     kf.change_x(predicted_state); kf.change_P(predicted_covariance); state_point = predicted_state;
                     good_matches = 0; ++bad_matches;
                     tracking_status = "DEGRADED";
-                    fins_node->logger->warn("[FixedMap] Rejected update: features={} residual={} step={} angle={} failures={}",
-                        effct_feat_num, res_mean_last, jump, turn, bad_matches);
+                    fins_node->logger->warn("[FixedMap] Rejected update: features={} residual={} failures={}",
+                        effct_feat_num, res_mean_last, bad_matches);
                     if (bad_matches >= failures_before_lost) lose_tracking(Measures.acq_time);
                 } else {
                     bad_matches = 0;
