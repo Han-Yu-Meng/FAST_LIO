@@ -44,6 +44,7 @@
 #include <so3_math.h>
 #include <Eigen/Core>
 #include "IMU_Processing.hpp"
+#include "ct_sgal_refiner.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <pcl_conversions/pcl_conversions.h>
@@ -106,6 +107,7 @@ Eigen::Vector3d avg_ang_vel_ = Eigen::Vector3d::Zero();
 // 里 predict / get_x）与后端 mapping 线程（kf_copy = kf）访问。用一把锁保护
 // kf_copy 及高频发布要读的共享状态快照，消除两线程间的数据竞争。
 bool imu_rate_output_ = true;          // FastLIO.localization.imu_rate_output，默认 true
+CTSGALRefiner ct_sgal_refiner;         // CT-SGAL-LIO 因果固定滞后轨迹后处理（默认关闭）
 std::mutex kf_copy_mutex;
 // 高频发布需要的共享状态，由后端线程在锁内刷新，IMU 线程在锁内拷贝后使用：
 struct ImuRateSnapshot {
@@ -431,6 +433,8 @@ void process_and_publish_imu_odometry(
     // 锁内只做纯 Eigen 矩阵运算（微秒级，无 I/O），锁外才发布，临界区极短。
     state_ikfom imu_state;
     bool pub_localization_pose = false;
+    bool ct_sgal_active = false;
+    Eigen::Isometry3d snapshot_map_to_odom = Eigen::Isometry3d::Identity();
     geometry_msgs::msg::PoseWithCovarianceStamped loc_msg;
     {
         std::lock_guard<std::mutex> lock(kf_copy_mutex);
@@ -447,9 +451,13 @@ void process_and_publish_imu_odometry(
         // 让 /localization_pose 也达到 IMU 频率；协方差用 kf_copy 传播的 P。
         pub_localization_pose = imu_rate_output_ && imu_rate_snapshot.fixed_map_enabled
             && imu_rate_snapshot.locked && fins_node->required("localization_pose");
-        if (pub_localization_pose) {
+        // TF 的平滑不依赖 /localization_pose 是否有订阅者；只要 LOCKED 且开关打开就跑。
+        ct_sgal_active = imu_rate_output_ && imu_rate_snapshot.fixed_map_enabled
+            && imu_rate_snapshot.locked && ct_sgal_refiner.enabled();
+        if (pub_localization_pose || ct_sgal_active) {
+            snapshot_map_to_odom = imu_rate_snapshot.map_to_odom;
             loc_msg = compose_localization_pose(
-                imu_state, kf_copy.get_P(), imu_rate_snapshot.map_to_odom,
+                imu_state, kf_copy.get_P(), snapshot_map_to_odom,
                 imu_rate_snapshot.base_R_lidar, imu_rate_snapshot.base_T_lidar, t);
         }
     }
@@ -522,8 +530,52 @@ void process_and_publish_imu_odometry(
     imu_odometry.twist.twist.angular.y = planar_constraint_ ? 0.0 : ang_vel_base(1);
     imu_odometry.twist.twist.angular.z = ang_vel_base(2);
 
-    // 发布里程计（IMU 频率）
-    publish_imu_odometry(imu_odometry, t);
+    // CT-SGAL-LIO：平滑在 map 系完成（与 /localization_pose 用同一结果），
+    // 再反算回 odom 系供 odom->base_link TF 使用。/Odometry 消息本身不变。
+    geometry_msgs::msg::Pose smooth_tf_pose;
+    bool tf_smoothed = false;
+    if (ct_sgal_active) {
+        Eigen::Vector3d raw_p(loc_msg.pose.pose.position.x,
+                              loc_msg.pose.pose.position.y,
+                              loc_msg.pose.pose.position.z);
+        Eigen::Quaterniond raw_q(loc_msg.pose.pose.orientation.w,
+                                 loc_msg.pose.pose.orientation.x,
+                                 loc_msg.pose.pose.orientation.y,
+                                 loc_msg.pose.pose.orientation.z);
+        Eigen::Vector3d smooth_p;
+        Eigen::Quaterniond smooth_q;
+        // 时间戳保持当前时刻（下游新鲜度检查不受影响）；多项式在固定滞后
+        // 时刻求值，滞后量由 ct_sgal_lag 控制。缓存不足时自动透传原始位姿。
+        if (ct_sgal_refiner.update(fins::to_seconds(t), raw_p, raw_q,
+                                   smooth_p, smooth_q)) {
+            if (pub_localization_pose) {
+                loc_msg.pose.pose.position.x = smooth_p.x();
+                loc_msg.pose.pose.position.y = smooth_p.y();
+                loc_msg.pose.pose.position.z = smooth_p.z();
+                loc_msg.pose.pose.orientation.w = smooth_q.w();
+                loc_msg.pose.pose.orientation.x = smooth_q.x();
+                loc_msg.pose.pose.orientation.y = smooth_q.y();
+                loc_msg.pose.pose.orientation.z = smooth_q.z();
+            }
+            // pose_odom = (map->odom)^-1 * pose_map
+            Eigen::Isometry3d smooth_map = Eigen::Isometry3d::Identity();
+            smooth_map.linear() = Eigen::Quaterniond(smooth_q).toRotationMatrix();
+            smooth_map.translation() = smooth_p;
+            Eigen::Isometry3d smooth_odom = snapshot_map_to_odom.inverse() * smooth_map;
+            Eigen::Quaterniond tq(smooth_odom.linear());
+            smooth_tf_pose.position.x = smooth_odom.translation().x();
+            smooth_tf_pose.position.y = smooth_odom.translation().y();
+            smooth_tf_pose.position.z = smooth_odom.translation().z();
+            smooth_tf_pose.orientation.w = tq.w();
+            smooth_tf_pose.orientation.x = tq.x();
+            smooth_tf_pose.orientation.y = tq.y();
+            smooth_tf_pose.orientation.z = tq.z();
+            tf_smoothed = true;
+        }
+    }
+
+    // 发布里程计（IMU 频率）：/Odometry 位姿与速度始终原样；仅 TF 在平滑成功时替换位姿。
+    publish_imu_odometry(imu_odometry, t, tf_smoothed ? &smooth_tf_pose : nullptr);
     // 发布 map 系全局定位位姿（IMU 频率，仅 fixed_map 且 LOCKED 时）
     if (pub_localization_pose) fins_node->send("localization_pose", loc_msg, t);
 }
@@ -793,21 +845,25 @@ void set_posestamp(T & out)
     }
 }
 
-void publish_imu_odometry(const nav_msgs::msg::Odometry &odom, fins::AcqTime t)
+// tf_pose 非空时，odom->base_link TF 使用它（CT-SGAL 平滑后的 odom 系位姿）；
+// /Odometry 消息本身始终发送原始的 odom 参数，不受影响。
+void publish_imu_odometry(const nav_msgs::msg::Odometry &odom, fins::AcqTime t,
+                          const geometry_msgs::msg::Pose *tf_pose = nullptr)
 {
     if (fins_node->required("odometry")) {
         fins_node->send("odometry", odom, t);
     }
 
     if (fins_node->required("$T_{odom}^{base}$")) {
+        const geometry_msgs::msg::Pose &p = tf_pose ? *tf_pose : odom.pose.pose;
         geometry_msgs::msg::TransformStamped tf;
         tf.header.stamp = odom.header.stamp;
         tf.header.frame_id = odom.header.frame_id;
         tf.child_frame_id = odom.child_frame_id;
-        tf.transform.translation.x = odom.pose.pose.position.x;
-        tf.transform.translation.y = odom.pose.pose.position.y;
-        tf.transform.translation.z = odom.pose.pose.position.z;
-        tf.transform.rotation = odom.pose.pose.orientation;
+        tf.transform.translation.x = p.position.x;
+        tf.transform.translation.y = p.position.y;
+        tf.transform.translation.z = p.position.z;
+        tf.transform.rotation = p.orientation;
         fins_node->send("$T_{odom}^{base}$", tf, t);
     }
 }
@@ -1223,6 +1279,25 @@ void initialize() {
     max_alignment_age = localization.get("max_alignment_age", 10.0).greater_than(0.0);
     imu_rate_output_ = localization.get("imu_rate_output", true)
                            .with_description("publish odometry/localization_pose at IMU rate in fixed-map localization");
+
+    // CT-SGAL-LIO 轨迹后处理：对 /localization_pose 的输出流做因果平滑。
+    // 默认关闭；只需在 config/fastlio_mid360.yaml 把 ct_sgal_enabled 改为 true 即可启用/回退。
+    CTSGALRefiner::Params cp;
+    cp.enabled = localization.get("ct_sgal_enabled", false)
+                     .with_description("CT-SGAL-LIO fixed-lag trajectory refinement for /localization_pose");
+    cp.window = localization.get("ct_sgal_window", 0.3).greater_than(0.0);
+    cp.lag = localization.get("ct_sgal_lag", 0.2).greater_than(0.0);
+    cp.huber_delta = localization.get("ct_sgal_huber_delta", 0.05).greater_than(0.0);
+    cp.lambda_p = localization.get("ct_sgal_lambda_p", 1.0).greater_than(0.0);
+    cp.lambda_R = localization.get("ct_sgal_lambda_R", 1.0).greater_than(0.0);
+    cp.irls_iters = localization.get("ct_sgal_irls_iters", 3).greater_than(0);
+    cp.sigma_p = localization.get("ct_sgal_sigma_p", 1.0).greater_than(0.0);
+    cp.sigma_R = localization.get("ct_sgal_sigma_R", 1.0).greater_than(0.0);
+    ct_sgal_refiner.configure(cp);
+    if (cp.enabled) {
+        fins_node->logger->info("[CT-SGAL] refinement enabled: W={:.2f}s lag={:.2f}s lambda_p={:.2f} lambda_R={:.2f}",
+                                cp.window, cp.lag, cp.lambda_p, cp.lambda_R);
+    }
     if (fixed_map_enabled) {
         std::string map_path = localization.get("map_path", std::string(""));
         double leaf = localization.get("map_leaf_size", 0.15).greater_than(0.0);
